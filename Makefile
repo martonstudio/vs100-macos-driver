@@ -4,8 +4,9 @@
 #   make driver     CoreAudio HAL plug-in  -> build/VS100.driver
 #   make midi       CoreMIDI bridge daemon -> build/vs100_midid
 #   make tools      engine test + HAL harness
-#   make install    (asks for sudo) install the HAL plug-in + MIDI launch agent
-#   make uninstall
+#   make pkg        build/VS100-Driver-<version>.pkg (HAL plug-in, MIDI bridge + agent, control app)
+#   make install    (sudo) build and install the pkg
+#   make uninstall  (sudo) remove everything the pkg installed
 #
 CC       ?= clang
 ARCHS    ?= $(shell uname -m)
@@ -63,13 +64,17 @@ $(BUILD)/VS100\ Control.app/Contents/MacOS/VS100Control: ui/VS100Control.swift u
 	swiftc -O -parse-as-library -target $(firstword $(ARCHS))-apple-macos$(MINOS) -o "$@" ui/VS100Control.swift -framework SwiftUI -framework CoreAudio -framework CoreMIDI -framework AppKit
 	codesign --force --sign - "$(BUILD)/VS100 Control.app"
 
-install: driver midi ui
-	./scripts/install.sh
+VERSION  ?= 0.1.0
+pkg: driver midi ui
+	chmod +x scripts/build-pkg.sh && scripts/build-pkg.sh $(VERSION)
+
+install: pkg
+	sudo installer -pkg $(BUILD)/VS100-Driver-$(VERSION).pkg -target /
 
 uninstall:
-	./scripts/uninstall.sh
+	sudo "/Library/Application Support/VS100/uninstall.sh"
 
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all driver midi tools ui install uninstall clean
+.PHONY: all driver midi tools ui pkg install uninstall clean

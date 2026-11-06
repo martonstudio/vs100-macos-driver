@@ -1,0 +1,38 @@
+#!/bin/bash
+# VS-100 driver pkg postinstall (runs as root).
+HAL=/Library/Audio/Plug-Ins/HAL
+AGENT=/Library/LaunchAgents/com.vs100.midid.plist
+
+# Console (logged-in GUI) user, if any.
+CUSER=$(stat -f %Su /dev/console 2>/dev/null)
+[ "$CUSER" = "root" ] && CUSER=""
+CUID=""; CHOME=""
+if [ -n "$CUSER" ]; then CUID=$(id -u "$CUSER"); CHOME=$(dscl . -read "/Users/$CUSER" NFSHomeDirectory | awk '{print $2}'); fi
+
+# --- remove the old UA4FX-named build, if present ---
+if [ -n "$CUID" ]; then
+    launchctl bootout "gui/$CUID/com.ua4fx.midid" 2>/dev/null
+    rm -f "$CHOME/Library/LaunchAgents/com.ua4fx.midid.plist"
+    rm -rf "$CHOME/Library/Application Support/UA4FX" "$CHOME/Applications/UA4FX Control.app"
+fi
+for f in /Library/LaunchAgents/com.ua4fx.*.plist; do
+    [ -e "$f" ] || continue
+    [ -n "$CUID" ] && launchctl bootout "gui/$CUID/$(basename "$f" .plist)" 2>/dev/null
+    rm -f "$f"
+done
+rm -rf "$HAL/UA4FX.driver"
+
+# --- permissions of what the pkg installed ---
+chown -R root:wheel "$HAL/VS100.driver" "/Library/Application Support/VS100" "$AGENT"
+chmod 644 "$AGENT"
+chmod 755 "/Library/Application Support/VS100/uninstall.sh" "/Library/Application Support/VS100/vs100_midid"
+
+# --- (re)load the MIDI bridge for the logged-in user; others get it at next login ---
+if [ -n "$CUID" ]; then
+    launchctl bootout "gui/$CUID/com.vs100.midid" 2>/dev/null
+    launchctl bootstrap "gui/$CUID" "$AGENT" 2>/dev/null
+fi
+
+# --- restart coreaudiod so it loads the plug-in (launchd relaunches it) ---
+killall coreaudiod 2>/dev/null
+exit 0
