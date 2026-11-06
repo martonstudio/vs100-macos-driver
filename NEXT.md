@@ -1,5 +1,8 @@
 # NEXT
 
-Run `scripts/check-midi.sh` with the VS-100 connected and move a fader and press PLAY while it
-runs. Done = lines like `src 1: e0 ..` / `src 1: 90 5e 7f` appear under "VS-100 Control"
-and the final line says `RESULT: received N messages`.
+Finish-line check (PLAN.md): with headphones on the VS-100 phones out, record and play back in a
+DAW for 10+ minutes at 128 samples, and map "VS-100 Control" as a Mackie Control surface.
+
+Done = clean audio on headphones and inputs for 10 min (no clicks/dropouts), transport buttons
+drive the DAW, and `/usr/bin/log show --last 15m --predicate 'subsystem == "com.vs100.driver"'`
+shows no resyncs or errors.
