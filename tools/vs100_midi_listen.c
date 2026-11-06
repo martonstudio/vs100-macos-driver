@@ -18,7 +18,7 @@ static void name_of(MIDIObjectRef o, char *b, size_t n) {
     if (s) { CFStringGetCString(s, b, n, kCFStringEncodingUTF8); CFRelease(s); }
 }
 static void rd(const MIDIPacketList *pl, void *rc, void *src) {
-    int idx = (int)(intptr_t)rc; const MIDIPacket *p = &pl->packet[0];
+    (void)rc; int idx = (int)(intptr_t)src;   /* per-source refCon from MIDIPortConnectSource */ const MIDIPacket *p = &pl->packet[0];
     for (UInt32 i = 0; i < pl->numPackets; i++) {
         printf("src %d:", idx); for (UInt16 k = 0; k < p->length; k++) printf(" %02x", p->data[k]); printf("\n"); fflush(stdout);
         gCount[idx]++; p = MIDIPacketNext(p);
