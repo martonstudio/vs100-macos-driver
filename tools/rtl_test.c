@@ -32,9 +32,12 @@ int main(int argc,char**argv){ UInt32 bs = argc>1?atoi(argv[1]):64; recCh = argc
   double peakAll=0; for(unsigned long i=0;i<recN;i++) if(fabs(rec[i])>peakAll) peakAll=fabs(rec[i]);
   printf("input peak %.3f (%.1f dBFS), %d clicks emitted\n",peakAll,peakAll>0?20*log10(peakAll):-200.0,nClicks);
   if(peakAll<0.01){ printf("No signal on the input: is the loopback cable connected (output -> input) and input gain up?\n"); return 1; }
+  /* onset = first sample whose |value| crosses 25% of the overall peak, linearly interpolated.
+     (Peak-picking is wrong here: the converter filters ring and the maximum wanders by +-20 samples.) */
   int found=0; double sum=0, mn=1e9, mx=0;
-  for(int c=1;c<nClicks;c++){ unsigned long from=clickPos[c], to=clickPos[c]+(unsigned long)(rate*0.2); if(to>recN) break; unsigned long best=from; double bv=0; for(unsigned long i=from;i<to;i++){ double v=fabs(rec[i]); if(v>bv){bv=v;best=i;} } if(bv<peakAll*0.3) continue; double d=(double)(best-from); found++; sum+=d; if(d<mn)mn=d; if(d>mx)mx=d; }
+  for(int c=1;c<nClicks;c++){ unsigned long from=clickPos[c], to=clickPos[c]+(unsigned long)(rate*0.2); if(to>recN) break; double thr=0.25*peakAll; unsigned long i=from; while(i<to && fabs(rec[i])<thr) i++; if(i>=to||i==from) continue;
+    double a=fabs(rec[i-1]), b=fabs(rec[i]); double d=(double)(i-1-from)+(thr-a)/(b-a); if(getenv("RTL_VERBOSE")) printf("click %d: onset +%.2f samples\n",c,d); found++; sum+=d; if(d<mn)mn=d; if(d>mx)mx=d; }
   if(!found){ printf("clicks not detected in input\n"); return 1; }
-  printf("round-trip: mean %.1f samples = %.2f ms (min %.2f, max %.2f ms) over %d clicks\n", sum/found, sum/found*1000/rate, mn*1000/rate, mx*1000/rate, found);
+  printf("round-trip: mean %.1f samples = %.2f ms (min %.2f, max %.2f ms) over %d clicks; jitter (max-min) %.2f samples\n", sum/found, sum/found*1000/rate, mn*1000/rate, mx*1000/rate, found, mx-mn);
   printf("(includes ADC/DAC converter latency of the UA-4FX itself; jitter between clicks should be < 1 sample)\n");
   return 0; }
