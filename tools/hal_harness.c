@@ -121,7 +121,7 @@ int main(int argc, char **argv) {
     CHECK((*drv)->StartIO(drv, dev, 1));
     addr.mSelector = kAudioDevicePropertyDeviceIsRunning; CHECK((*drv)->GetPropertyData(drv, dev, 0, &addr, 0, NULL, sizeof u, &size, &u)); printf("running: %u\n", u);
 
-    const UInt32 bufFrames = 512; Float32 *io = calloc(bufFrames * 2, sizeof(Float32));
+    const UInt32 bufFrames = 512; Float32 *io = calloc(bufFrames * 10, sizeof(Float32));   /* VS-100: 6 out / 10 in */
     double phase = 0; double T = tps(); uint64_t t0 = mach_absolute_time();
     Float64 lastZ = -1; UInt64 lastH = 0; int nZ = 0; double maxErrUs = 0; double peak = 0; UInt64 cycles = 0;
     int64_t nextOut = -1, nextIn = -1;
@@ -134,7 +134,7 @@ int main(int argc, char **argv) {
         if (nextOut < 0) { nextOut = (int64_t)nowS + safOut + bufFrames; nextIn = (int64_t)nowS - safIn - 2 * bufFrames; }
         ci.mIOCycleCounter = ++cycles; ci.mNominalIOBufferFrameSize = bufFrames;
         while ((double)nextOut < nowS + safOut + 2 * bufFrames) {
-            for (UInt32 k = 0; k < bufFrames; k++) { float v = 0.1f * sinf((float)phase); phase += 2 * M_PI * 440.0 / rate; io[2*k] = io[2*k+1] = v; }
+            for (UInt32 k = 0; k < bufFrames; k++) { float v = 0.1f * sinf((float)phase); phase += 2 * M_PI * 440.0 / rate; io[6*k] = io[6*k+1] = v; io[6*k+2] = io[6*k+3] = io[6*k+4] = io[6*k+5] = 0; }
             ci.mOutputTime.mSampleTime = (Float64)nextOut; ci.mOutputTime.mFlags = kAudioTimeStampSampleTimeValid;
             CHECK((*drv)->BeginIOOperation(drv, dev, 1, kAudioServerPlugInIOOperationWriteMix, bufFrames, &ci));
             CHECK((*drv)->DoIOOperation(drv, dev, outStream, 1, kAudioServerPlugInIOOperationWriteMix, bufFrames, &ci, io, NULL));
@@ -144,7 +144,7 @@ int main(int argc, char **argv) {
         while ((double)nextIn + bufFrames < nowS - safIn) {
             ci.mInputTime.mSampleTime = (Float64)nextIn; ci.mInputTime.mFlags = kAudioTimeStampSampleTimeValid;
             CHECK((*drv)->DoIOOperation(drv, dev, inStream, 1, kAudioServerPlugInIOOperationReadInput, bufFrames, &ci, io, NULL));
-            for (UInt32 k = 0; k < bufFrames * 2; k++) { double a = fabs(io[k]); if (a > peak) peak = a; }
+            for (UInt32 k = 0; k < bufFrames * 10; k++) { double a = fabs(io[k]); if (a > peak) peak = a; }
             nextIn += bufFrames;
         }
         usleep(2000);

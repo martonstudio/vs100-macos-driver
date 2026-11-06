@@ -37,11 +37,13 @@ enum {
 #define kVolume_MinDB (-60.0)
 #define kVolume_MaxDB (0.0)
 
-#define kDevice_Name          "EDIROL UA-4FX"
-#define kDevice_Manufacturer  "Roland / EDIROL"
-#define kDevice_ModelUID      "com.ua4fx.driver:UA-4FX"
+#define kDevice_Name          "V-Studio 100"
+#define kDevice_Manufacturer  "Roland / Cakewalk"
+#define kDevice_ModelUID      "com.ua4fx.driver:VS-100"
 #define kPlugIn_BundleID      "com.ua4fx.driver"
-#define kChannels             2
+#define kChannelsOut          UA4FX_CHANNELS_OUT
+#define kChannelsIn           UA4FX_CHANNELS_IN
+#define kChannelsFor(isIn)    ((isIn) ? kChannelsIn : kChannelsOut)
 
 /* ------------------------------------------------------------------------- */
 /* state                                                                      */
@@ -57,7 +59,7 @@ static Boolean gInputStreamActive = true, gOutputStreamActive = true;
 
 /* user parameters (set from the control app through custom properties) */
 static _Atomic float gInputGain = 1.0f, gOutputGain = 1.0f;   /* linear, effective = trim + volume */
-static double gInputTrimDB = 0.0, gOutputTrimDB = 7.0;        /* "base" gain, set from the control app */
+static double gInputTrimDB = 0.0, gOutputTrimDB = 0.0;        /* "base" gain, set from the control app */
 static double gInputVolDB = 0.0, gOutputVolDB = 0.0;          /* macOS volume slider / media keys, kVolume_MinDB..kVolume_MaxDB */
 static Boolean gInputMute = false, gOutputMute = false;
 #define kTrim_MinDB (-24.0)
@@ -338,8 +340,8 @@ static OSStatus UA4FX_AbortDeviceConfigurationChange(AudioServerPlugInDriverRef 
 /* ------------------------------------------------------------------------- */
 /* property helpers                                                           */
 
-static AudioStreamBasicDescription stream_format(void) {
-    AudioStreamBasicDescription d;
+static AudioStreamBasicDescription stream_format(Boolean isInput) {
+    AudioStreamBasicDescription d; const UInt32 kChannels = kChannelsFor(isInput);
     d.mSampleRate = gSampleRate;
     d.mFormatID = kAudioFormatLinearPCM;
     d.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagsNativeEndian | kAudioFormatFlagIsPacked;
@@ -539,6 +541,7 @@ static OSStatus get_property(AudioObjectID inObjectID, const AudioObjectProperty
             case kUA4FX_Property_Stats:  REQUIRE(sizeof(CFPropertyListRef)); *(CFPropertyListRef *)outData = copy_stats_dict(); return 0;
             case kAudioDevicePropertyPreferredChannelsForStereo: REQUIRE(2 * sizeof(UInt32)); ((UInt32 *)outData)[0] = 1; ((UInt32 *)outData)[1] = 2; return 0;
             case kAudioDevicePropertyPreferredChannelLayout: {
+                const UInt32 kChannels = kChannelsFor(a->mScope == kAudioObjectPropertyScopeInput);
                 UInt32 sz = offsetof(AudioChannelLayout, mChannelDescriptions) + kChannels * sizeof(AudioChannelDescription);
                 REQUIRE(sz);
                 AudioChannelLayout *l = (AudioChannelLayout *)outData;
@@ -557,7 +560,7 @@ static OSStatus get_property(AudioObjectID inObjectID, const AudioObjectProperty
             case kAudioObjectPropertyBaseClass:  REQUIRE(sizeof(AudioClassID)); *(AudioClassID *)outData = kAudioObjectClassID; return 0;
             case kAudioObjectPropertyClass:      REQUIRE(sizeof(AudioClassID)); *(AudioClassID *)outData = kAudioStreamClassID; return 0;
             case kAudioObjectPropertyOwner:      REQUIRE(sizeof(AudioObjectID)); *(AudioObjectID *)outData = kObjectID_Device; return 0;
-            case kAudioObjectPropertyName:       REQUIRE(sizeof(CFStringRef)); *(CFStringRef *)outData = isInput ? CFSTR("UA-4FX Input") : CFSTR("UA-4FX Output"); return 0;
+            case kAudioObjectPropertyName:       REQUIRE(sizeof(CFStringRef)); *(CFStringRef *)outData = isInput ? CFSTR("VS-100 Input") : CFSTR("VS-100 Output"); return 0;
             case kAudioObjectPropertyOwnedObjects: *outDataSize = 0; return 0;
             case kAudioStreamPropertyIsActive:   REQUIRE(sizeof(UInt32)); *(UInt32 *)outData = (isInput ? gInputStreamActive : gOutputStreamActive) ? 1 : 0; return 0;
             case kAudioStreamPropertyDirection:  REQUIRE(sizeof(UInt32)); *(UInt32 *)outData = isInput ? 1 : 0; return 0;
@@ -565,13 +568,13 @@ static OSStatus get_property(AudioObjectID inObjectID, const AudioObjectProperty
             case kAudioStreamPropertyStartingChannel: REQUIRE(sizeof(UInt32)); *(UInt32 *)outData = 1; return 0;
             case kAudioStreamPropertyLatency:    REQUIRE(sizeof(UInt32)); *(UInt32 *)outData = 0; return 0;
             case kAudioStreamPropertyVirtualFormat:
-            case kAudioStreamPropertyPhysicalFormat: REQUIRE(sizeof(AudioStreamBasicDescription)); *(AudioStreamBasicDescription *)outData = stream_format(); return 0;
+            case kAudioStreamPropertyPhysicalFormat: REQUIRE(sizeof(AudioStreamBasicDescription)); *(AudioStreamBasicDescription *)outData = stream_format(isInput); return 0;
             case kAudioStreamPropertyAvailableVirtualFormats:
             case kAudioStreamPropertyAvailablePhysicalFormats: {
                 if (!outData) { *outDataSize = sizeof(AudioStreamRangedDescription); return 0; }
                 if (inDataSize < sizeof(AudioStreamRangedDescription)) { *outDataSize = 0; return 0; }
                 AudioStreamRangedDescription *r = (AudioStreamRangedDescription *)outData;
-                r->mFormat = stream_format(); r->mSampleRateRange.mMinimum = r->mSampleRateRange.mMaximum = gSampleRate;
+                r->mFormat = stream_format(isInput); r->mSampleRateRange.mMinimum = r->mSampleRateRange.mMaximum = gSampleRate;
                 *outDataSize = sizeof(AudioStreamRangedDescription); return 0;
             }
         }
@@ -668,7 +671,7 @@ static OSStatus UA4FX_SetPropertyData(AudioServerPlugInDriverRef inDriver, Audio
             case kAudioStreamPropertyPhysicalFormat: {
                 if (inDataSize != sizeof(AudioStreamBasicDescription)) return kAudioHardwareBadPropertySizeError;
                 const AudioStreamBasicDescription *d = (const AudioStreamBasicDescription *)inData;
-                if (d->mFormatID != kAudioFormatLinearPCM || d->mChannelsPerFrame != kChannels || d->mSampleRate != gSampleRate || !(d->mFormatFlags & kAudioFormatFlagIsFloat) || d->mBitsPerChannel != 32)
+                if (d->mFormatID != kAudioFormatLinearPCM || d->mChannelsPerFrame != kChannelsFor(inObjectID == kObjectID_Stream_Input) || d->mSampleRate != gSampleRate || !(d->mFormatFlags & kAudioFormatFlagIsFloat) || d->mBitsPerChannel != 32)
                     return kAudioDeviceUnsupportedFormatError;
                 return 0;
             }
@@ -740,31 +743,27 @@ static OSStatus UA4FX_DoIOOperation(AudioServerPlugInDriverRef inDriver, AudioOb
     if (!ioMainBuffer || !inIOCycleInfo) return kAudioHardwareIllegalOperationError;
     if (inIOBufferFrameSize > UA4FX_RING_FRAMES / 4) return kAudioHardwareIllegalOperationError;
 
-    /* scratch buffer for the device's native 24-bit packed frames. The HAL runs
+    /* scratch buffer for the device's native S32_LE frames (24 valid MSBs). The HAL runs
      * all IO operations of a device on one IO thread, sequentially. */
-    static uint8_t native[UA4FX_RING_FRAMES / 4 * UA4FX_BYTES_PER_FRAME];
-    const UInt32 nSamples = inIOBufferFrameSize * kChannels;
+    static int32_t native[UA4FX_RING_FRAMES / 4 * UA4FX_CHANNELS_IN];
 
     if (inOperationID == kAudioServerPlugInIOOperationReadInput && inStreamObjectID == kObjectID_Stream_Input) {
         int64_t t = (int64_t)inIOCycleInfo->mInputTime.mSampleTime;
         ua4fx_engine_read_input(gEngine, t, inIOBufferFrameSize, native);
         Float32 *out = (Float32 *)ioMainBuffer;
-        const float scale = atomic_load(&gInputGain) / 8388608.0f;
-        for (UInt32 i = 0; i < nSamples; i++) {
-            const uint8_t *p = native + i * 3;
-            int32_t v = (int32_t)(((uint32_t)p[0] << 8) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 24)) >> 8;   /* sign-extend 24 → 32 */
-            out[i] = (Float32)v * scale;
-        }
+        const UInt32 nSamples = inIOBufferFrameSize * kChannelsIn;
+        const float scale = atomic_load(&gInputGain) / 2147483648.0f;
+        for (UInt32 i = 0; i < nSamples; i++) out[i] = (Float32)native[i] * scale;
         return 0;
     }
     if (inOperationID == kAudioServerPlugInIOOperationWriteMix && inStreamObjectID == kObjectID_Stream_Output) {
         const Float32 *in = (const Float32 *)ioMainBuffer;
+        const UInt32 nSamples = inIOBufferFrameSize * kChannelsOut;
         const float g = atomic_load(&gOutputGain);
         for (UInt32 i = 0; i < nSamples; i++) {
             float f = in[i] * g;
             if (f > 1.0f) f = 1.0f; else if (f < -1.0f) f = -1.0f;
-            int32_t v = (int32_t)(f * 8388607.0f);
-            uint8_t *p = native + i * 3; p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16);
+            native[i] = (int32_t)(f * 8388607.0f) * 256;     /* 24-bit value in the top 3 bytes */
         }
         int64_t t = (int64_t)inIOCycleInfo->mOutputTime.mSampleTime;
         ua4fx_engine_write_output(gEngine, t, inIOBufferFrameSize, native);
