@@ -5,3 +5,4 @@ ref/
 BUDGET.md
 *.bak
 00_original_firmware/
+.claude/
