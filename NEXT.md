@@ -1,5 +1,5 @@
 # NEXT
 
-Step 3 of PLAN.md: engine port in driver/UA4FX_USB.c, tested with tools/ua4fx_test.
-Done = 440 Hz tone audible on VS-100 outputs 1/2 and capture frame counts steady at
-48000/s for 60 s with 0 errors.
+Run `scripts/check-midi.sh` with the VS-100 connected and move a fader and press PLAY while it
+runs. Done = lines like `src 1: e0 ..` / `src 1: 90 5e 7f` appear under "VS-100 Control"
+and the final line says `RESULT: received N messages`.

@@ -1,22 +1,17 @@
 # PLAN — VS-100 on Apple Silicon macOS
 
-Finish line: the V-Studio 100 appears in Audio MIDI Setup as a 6-out / 10-in 48 kHz
-CoreAudio device that plays and records glitch-free in a DAW for 10+ minutes, and its
-faders/transport show up as a CoreMIDI device. User-space only.
+Finish line: the V-Studio 100 appears as a 6-out / 10-in 48 kHz CoreAudio device that plays and
+records glitch-free in a DAW for 10+ minutes, and its faders/transport arrive in a DAW via CoreMIDI.
+User-space only, installed by `build/VS100-Driver-<version>.pkg`.
 
 ## Steps
-Order: audio first (user priority), so run 3 → 4 → 2 → 5. Step 1 is complete.
-1. MIDI proof: claim IF 2 from user space, read bulk 0x83 while moving a fader. Proves
-   macOS lets user space own the device and shows the control-surface byte format.
-2. MIDI bridge: adapt `midi/ua4fx_midid.c` to VID/PID 0582:00EB, endpoints 0x04/0x83.
-   Done = faders visible in MIDI Monitor.
-3. Engine port in `driver/UA4FX_USB.c`, tested with `tools/ua4fx_test` before any HAL work:
-   high-speed microframe scheduling, 4-byte samples, 6/10 channels, implicit feedback
-   (out packet sizes follow captured packet sizes). Done = 440 Hz tone on outputs 1/2 and
-   clean input counts for 60 s.
-4. HAL plug-in: channel counts and names in `driver/UA4FX_Driver.c`, verify with
-   `tools/hal_harness`, then install to coreaudiod.
-5. Rename product strings/bundle IDs from UA4FX to VS100 (separate commit, no behaviour change).
+1. Hands test of MIDI receive: `scripts/check-midi.sh` while moving faders / pressing transport
+   (cable 1 expected; cable 0 needs a MIDI cable from the 5-pin OUT to a source).
+2. DAW soak: 10+ minutes play + record in a DAW at 48 kHz, buffer 64..512, watch
+   `log show --predicate 'subsystem == "com.vs100.driver"'` for rxErr/resyncs/snaps.
+3. Control surface: map Mackie-style messages (docs/MIDI_CAPTURE.md) in the DAW; capture remaining
+   faders/encoders and host-to-device messages (LEDs / motor faders) if they matter.
+4. Gain/mixer: the VS-100 has hardware mixer controls on the control-request path; not yet analysed.
 
 ## Constraints
 - No kexts, DriverKit entitlements, SIP changes, or firmware flashing. Firmware route is
@@ -25,3 +20,8 @@ Order: audio first (user priority), so run 3 → 4 → 2 → 5. Step 1 is comple
 - Roland firmware and drivers may be analysed and disassembled (owner's right to repair, EU/AU). Vendor files stay out of git.
 - Descriptor facts live in `docs/DESCRIPTORS.md`; read it rather than re-probing.
 - `ref/` holds read-only upstream clones and is not committed.
+- Never run `build/vs100_test` while the plug-in is installed: coreaudiod holds the USB device (USBDeviceOpen fails).
+- The MIDI bridge must open only interface 2 (never the device) so it can coexist with the HAL plug-in.
+- IOKit property matching on IOUSBHostInterface matches nothing on this macOS: match the class, filter on registry properties.
+- Measure loopback onset by threshold crossing, never by peak position (the converter filter rings; docs/LOOPBACK_JITTER.md).
+- Staging for pkgbuild must be outside Dropbox (Dropbox xattrs get packed as ._ files).
