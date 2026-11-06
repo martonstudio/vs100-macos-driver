@@ -29,14 +29,18 @@ $(BUNDLE)/Contents/MacOS/UA4FX: driver/UA4FX_Driver.c $(ENGINE) $(HDRS) driver/I
 	$(CC) $(CFLAGS) -bundle -o $@ driver/UA4FX_Driver.c $(ENGINE) $(FW_BASE) -framework CoreAudio
 	codesign --force --sign - $(BUNDLE)
 
-midi: $(BUILD)/ua4fx_midid
+midi: $(BUILD)/vs100_midid
 
-$(BUILD)/ua4fx_midid: midi/ua4fx_midid.c $(HDRS)
+$(BUILD)/vs100_midid: midi/vs100_midid.c $(HDRS)
 	@mkdir -p $(BUILD)
-	$(CC) $(CFLAGS) -DUA4FX_LOG_STDERR=1 -o $@ midi/ua4fx_midid.c $(FW_BASE) -framework CoreMIDI
+	$(CC) $(CFLAGS) -DUA4FX_LOG_STDERR=1 -o $@ midi/vs100_midid.c $(FW_BASE) -framework CoreMIDI
 	codesign --force --sign - $@
 
-tools: $(BUILD)/ua4fx_test $(BUILD)/hal_harness $(BUILD)/rtl_test
+tools: $(BUILD)/ua4fx_test $(BUILD)/hal_harness $(BUILD)/rtl_test $(BUILD)/vs100_midi_listen
+
+$(BUILD)/vs100_midi_listen: tools/vs100_midi_listen.c
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) -o $@ tools/vs100_midi_listen.c -framework CoreFoundation -framework CoreMIDI
 
 $(BUILD)/rtl_test: tools/rtl_test.c
 	@mkdir -p $(BUILD)
