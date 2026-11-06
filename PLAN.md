@@ -5,6 +5,7 @@ CoreAudio device that plays and records glitch-free in a DAW for 10+ minutes, an
 faders/transport show up as a CoreMIDI device. User-space only.
 
 ## Steps
+Order: audio first (user priority), so run 3 → 4 → 2 → 5. Step 1 is complete.
 1. MIDI proof: claim IF 2 from user space, read bulk 0x83 while moving a fader. Proves
    macOS lets user space own the device and shows the control-surface byte format.
 2. MIDI bridge: adapt `midi/ua4fx_midid.c` to VID/PID 0582:00EB, endpoints 0x04/0x83.

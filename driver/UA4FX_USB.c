@@ -46,7 +46,9 @@
 #include <string.h>
 
 #define RING UA4FX_RING_FRAMES
-#define BPF  UA4FX_BYTES_PER_FRAME
+#define BPFI UA4FX_BPF_IN
+#define BPFO UA4FX_BPF_OUT
+#define UPF  UA4FX_UFRAMES_PER_MS        /* frame-list entries (microframes) per 1 ms bus frame */
 #define MAXNF UA4FX_MAX_FRAMES_PER_XFER
 #define MAXNB UA4FX_MAX_XFERS_IN_FLIGHT
 #define START_LEAD_FRAMES 4          /* first submission this many bus frames ahead */
@@ -297,7 +299,7 @@ static IOReturn submit_xfer(stream_t *s, xfer_t *x) {
     x->frame = s->nextFrame;
     memset(x->done, 0, sizeof x->done);
     if (s->isInput) {
-        for (uint32_t i = 0; i < nf; i++) { x->fl[i].frReqCount = s->maxPacket; x->fl[i].frActCount = 0; x->fl[i].frStatus = 0; memset(&x->fl[i].frTimeStamp, 0, sizeof(AbsoluteTime)); }
+        for (uint32_t i = 0; i < nf * UPF; i++) { x->fl[i].frReqCount = s->maxPacket; x->fl[i].frActCount = 0; x->fl[i].frStatus = 0; memset(&x->fl[i].frTimeStamp, 0, sizeof(AbsoluteTime)); }
     } else {
         if (atomic_exchange(&e->realignRequest, false) && e->captureMaster) {
             /* put the read pointer where the capture timeline says this frame will be */
@@ -305,21 +307,26 @@ static IOReturn submit_xfer(stream_t *s, xfer_t *x) {
             double ahead = (double)((int64_t)x->frame - (int64_t)lf - 1); if (ahead < 0) ahead = 0;
             e->txSubmitted = rx + (uint64_t)(ahead * e->nominalPerMs); e->outAccum = 0; e->snaps++;
         }
-        uint32_t off = 0; double rate = atomic_load(&e->outRate); uint32_t maxN = s->maxPacket / BPF;
+        uint32_t off = 0; double rate = atomic_load(&e->outRate); uint32_t maxN = (s->maxPacket / BPFO) * UPF;
         for (uint32_t i = 0; i < nf; i++) {
             e->outAccum += rate; uint32_t n = (uint32_t)e->outAccum; e->outAccum -= n;
             if (n > maxN) n = maxN;
             if (n != (uint32_t)e->nominalPerMs) e->packetsAdjusted++;
-            x->pos[i] = e->txSubmitted; x->cnt[i] = n; x->off[i] = off; off += n * BPF;
+            x->pos[i] = e->txSubmitted; x->cnt[i] = n; x->off[i] = off; off += n * BPFO;
             e->txSubmitted += n;
-            x->fl[i].frReqCount = n * BPF; x->fl[i].frActCount = 0; x->fl[i].frStatus = 0; memset(&x->fl[i].frTimeStamp, 0, sizeof(AbsoluteTime));
+            /* spread the n audio frames of this ms over its UPF microframes: base each, first `rem` get one more */
+            uint32_t base = n / UPF, rem = n % UPF;
+            for (uint32_t u = 0; u < UPF; u++) {
+                IOUSBLowLatencyIsocFrame *f = &x->fl[i * UPF + u];
+                f->frReqCount = (base + (u < rem ? 1 : 0)) * BPFO; f->frActCount = 0; f->frStatus = 0; memset(&f->frTimeStamp, 0, sizeof(AbsoluteTime));
+            }
             e->posMap[(x->frame + i) % POSMAP].frame = x->frame + i; e->posMap[(x->frame + i) % POSMAP].posEnd = e->txSubmitted;
         }
         memset(x->buf, 0, off);                /* silence unless the tick thread fills it in time */
     }
     IOReturn kr = s->isInput
-        ? (*s->ifc)->LowLatencyReadIsochPipeAsync (s->ifc, s->pipe, x->buf, x->frame, nf, 1, x->fl, xfer_complete, x)
-        : (*s->ifc)->LowLatencyWriteIsochPipeAsync(s->ifc, s->pipe, x->buf, x->frame, nf, 1, x->fl, xfer_complete, x);
+        ? (*s->ifc)->LowLatencyReadIsochPipeAsync (s->ifc, s->pipe, x->buf, x->frame, nf * UPF, 1, x->fl, xfer_complete, x)
+        : (*s->ifc)->LowLatencyWriteIsochPipeAsync(s->ifc, s->pipe, x->buf, x->frame, nf * UPF, 1, x->fl, xfer_complete, x);
     if (kr == kIOReturnSuccess) { x->inFlight = true; s->inFlight++; s->nextFrame += nf; atomic_store_explicit(&x->ready, true, memory_order_release); }
     return kr;
 }
@@ -363,7 +370,7 @@ static void xfer_complete(void *refcon, IOReturn result, void *arg0) {
         harvest_locked(e, x);                     /* the transfer is complete: take whatever is left of it */
         for (uint32_t i = 0; i < e->nf; i++) if (!x->done[i]) e->lateHarvests++;
     } else {
-        for (uint32_t i = 0; i < e->nf; i++) { if (x->fl[i].frStatus != kIOReturnSuccess && x->fl[i].frStatus != kIOReturnUnderrun) e->txErrors++; e->txCompleted += x->cnt[i]; e->txPackets++; }
+        for (uint32_t i = 0; i < e->nf; i++) { for (uint32_t u = 0; u < UPF; u++) { IOReturn fs = x->fl[i * UPF + u].frStatus; if (fs != kIOReturnSuccess && fs != kIOReturnUnderrun) e->txErrors++; e->txPackets++; } e->txCompleted += x->cnt[i]; }
     }
     atomic_store_explicit(&x->ready, false, memory_order_release);
     IOReturn kr = stream_fill_queue_locked(s);
@@ -394,17 +401,25 @@ static void harvest_locked(engine_t *e, xfer_t *force) {
         }
         uint32_t i = (uint32_t)(e->nextHarvestFrame - x->frame);
         if (x->done[i]) { e->nextHarvestFrame++; continue; }
-        IOUSBLowLatencyIsocFrame *f = &x->fl[i];
+        IOUSBLowLatencyIsocFrame *f = &x->fl[i * UPF + UPF - 1];      /* last microframe of this ms: end-of-frame stamp */
         if (!frame_finished(f, x == force)) return;                     /* HC has not finished this frame yet */
-        IOReturn st = f->frStatus;
-        uint32_t n = (st == kIOReturnSuccess || st == kIOReturnUnderrun) ? f->frActCount / BPF : 0;
-        if (n == 0 && st != kIOReturnSuccess && st != kIOReturnUnderrun) e->rxErrors++;
+        uint32_t n = 0;
+        uint32_t un[UPF];
+        for (uint32_t u = 0; u < UPF; u++) {
+            IOUSBLowLatencyIsocFrame *uf = &x->fl[i * UPF + u];
+            IOReturn st = uf->frStatus;
+            un[u] = (st == kIOReturnSuccess || st == kIOReturnUnderrun) ? uf->frActCount / BPFI : 0;
+            if (st != kIOReturnSuccess && st != kIOReturnUnderrun) e->rxErrors++;
+            n += un[u];
+        }
         uint64_t hostEnd = at2u64(f->frTimeStamp);
         if (hostEnd == 0) { UInt64 rf; uint64_t rh; ref_read(e, &rf, &rh); hostEnd = rh + (uint64_t)((double)((int64_t)e->nextHarvestFrame - (int64_t)rf) * e->ticksPerMs); }
         if (n) {
             uint64_t pos = atomic_load(&e->rxCompleted);
-            const uint8_t *src = x->buf + i * s->maxPacket;
-            for (uint32_t k = 0; k < n; k++) memcpy(e->inRing + ((pos + k) & (RING - 1)) * BPF, src + k * BPF, BPF);
+            for (uint32_t u = 0; u < UPF; u++) {
+                const uint8_t *src = x->buf + (i * UPF + u) * s->maxPacket;
+                for (uint32_t k = 0; k < un[u]; k++, pos++) memcpy(e->inRing + (pos & (RING - 1)) * BPFI, src + k * BPFI, BPFI);
+            }
         }
         if (e->captureMaster) clock_advance(e, n, hostEnd);
         if (at2u64(f->frTimeStamp)) { double lag = ((double)mach_absolute_time() - (double)hostEnd) / e->ticksPerMs * 1000.0; if (lag > e->harvestLagMaxUs) e->harvestLagMaxUs = lag; else e->harvestLagMaxUs *= 0.9995; }
@@ -461,9 +476,9 @@ static void fill_locked(engine_t *e, UInt64 target, UInt64 current) {
         if (!x->done[i]) {
             uint32_t n = x->cnt[i]; uint64_t pos = x->pos[i]; uint8_t *dst = x->buf + x->off[i];
             for (uint32_t k = 0; k < n; k++) {
-                uint8_t *src = e->outRing + ((pos + k) & (RING - 1)) * BPF;
-                memcpy(dst + k * BPF, src, BPF);
-                memset(src, 0, BPF);
+                uint8_t *src = e->outRing + ((pos + k) & (RING - 1)) * BPFO;
+                memcpy(dst + k * BPFO, src, BPFO);
+                memset(src, 0, BPFO);
             }
             x->done[i] = 1;
         }
@@ -478,9 +493,9 @@ static void poll_tx_locked(engine_t *e) {
         xfer_t *x = find_xfer(s, e->nextTxPollFrame);
         if (!x) { UInt64 nf; if (next_ready_frame_after(s, e->nextTxPollFrame, &nf)) { e->nextTxPollFrame = nf; continue; } return; }
         uint32_t i = (uint32_t)(e->nextTxPollFrame - x->frame);
-        if (!frame_finished(&x->fl[i], false)) return;
+        if (!frame_finished(&x->fl[i * UPF + UPF - 1], false)) return;
         if (!e->captureMaster) {
-            uint64_t hostEnd = at2u64(x->fl[i].frTimeStamp);
+            uint64_t hostEnd = at2u64(x->fl[i * UPF + UPF - 1].frTimeStamp);
             if (hostEnd) { ref_publish(e, e->nextTxPollFrame, hostEnd); clock_advance(e, x->cnt[i], hostEnd); atomic_fetch_add(&e->rxCompleted, x->cnt[i]);
                 if (e->stampPending > 0 && --e->stampPending == 0) { uint64_t total = atomic_load(&e->rxCompleted); uint64_t host0 = hostEnd - (uint64_t)((double)total * e->ticksPerFrame); e->ztsHost = 0; zts_publish(e, 0.0, host0); e->ioStartHost = host0; } }
         }
@@ -561,11 +576,11 @@ static bool stream_prepare(stream_t *s) {
     s->nbuf = s->isInput ? e->nbuf : e->nbufOut;
     for (uint32_t b = 0; b < s->nbuf; b++) {
         xfer_t *x = &s->xf[b]; x->idx = (int)b; x->stream = s; x->inFlight = false; atomic_store(&x->ready, false);
-        kr = (*s->ifc)->LowLatencyCreateBuffer(s->ifc, (void **)&x->buf, s->maxPacket * e->nf, s->isInput ? kUSBLowLatencyReadBuffer : kUSBLowLatencyWriteBuffer);
+        kr = (*s->ifc)->LowLatencyCreateBuffer(s->ifc, (void **)&x->buf, s->maxPacket * e->nf * UPF, s->isInput ? kUSBLowLatencyReadBuffer : kUSBLowLatencyWriteBuffer);
         if (kr) { LOGE("LowLatencyCreateBuffer failed 0x%x", kr); return false; }
-        kr = (*s->ifc)->LowLatencyCreateBuffer(s->ifc, (void **)&x->fl, sizeof(IOUSBLowLatencyIsocFrame) * e->nf, kUSBLowLatencyFrameListBuffer);
+        kr = (*s->ifc)->LowLatencyCreateBuffer(s->ifc, (void **)&x->fl, sizeof(IOUSBLowLatencyIsocFrame) * e->nf * UPF, kUSBLowLatencyFrameListBuffer);
         if (kr) { LOGE("LowLatencyCreateBuffer(fl) failed 0x%x", kr); return false; }
-        memset(x->buf, 0, s->maxPacket * e->nf);
+        memset(x->buf, 0, s->maxPacket * e->nf * UPF);
     }
     s->stopping = false; s->inFlight = 0;
     return true;
@@ -606,7 +621,7 @@ static void job_start(engine_t *e, void *arg) {
     if (!atomic_load(&e->present)) return;
     if (atomic_load(&e->running)) { *res = 0; return; }
 
-    memset(e->inRing, 0, RING * BPF); memset(e->outRing, 0, RING * BPF);
+    memset(e->inRing, 0, RING * BPFI); memset(e->outRing, 0, RING * BPFO);
     atomic_store(&e->rxCompleted, 0); atomic_store(&e->lastHarvestFrame, 0);
     e->txSubmitted = e->txCompleted = 0; e->rxPackets = e->txPackets = e->rxErrors = e->txErrors = 0;
     e->rxBusFrames = 0; e->lostInFrames = e->lostOutFrames = 0; e->packetsAdjusted = e->snaps = e->lateFills = e->lateHarvests = 0;
@@ -679,7 +694,7 @@ bool ua4fx_engine_output_active(engine_t *e) { return atomic_load(&e->running) &
 
 static void device_detach(engine_t *e) {
     if (!e->dev) return;
-    LOG("UA-4FX detached");
+    LOG("VS-100 detached");
     if (atomic_load(&e->running)) job_stop(e, NULL);
     atomic_store(&e->present, false);
     atomic_store(&e->rate, 0);
@@ -742,7 +757,7 @@ static void device_attach(engine_t *e, io_service_t svc) {
     ifinfo_t infos[8]; int ni = parse_config(dev, infos, 8);
     uint32_t rate = 0; e->midiIfnum = 0xFF;
     for (int i = 0; i < ni; i++) {
-        if (infos[i].role == ROLE_PCM_IN || infos[i].role == ROLE_PCM_OUT) { uint32_t r = rate_from_maxpacket(infos[i].maxPacket); if (!r) r = infos[i].descRate; if (r) rate = r; }
+        if (infos[i].role == ROLE_PCM_IN || infos[i].role == ROLE_PCM_OUT) { uint32_t r = infos[i].descRate; if (!r) r = rate_from_maxpacket(infos[i].maxPacket); if (r) rate = r; }
         else if (infos[i].role == ROLE_MIDI) e->midiIfnum = infos[i].ifnum;
     }
     if (!rate) { LOGE("could not determine sample rate from descriptors"); (*dev)->USBDeviceClose(dev); (*dev)->Release(dev); IOObjectRelease(svc); return; }
@@ -769,7 +784,7 @@ static void device_attach(engine_t *e, io_service_t svc) {
     IOServiceAddInterestNotification(e->notifyPort, svc, kIOGeneralInterest, device_interest, e, &e->interestNotification);
     atomic_store(&e->rate, rate);
     atomic_store(&e->present, true);
-    LOG("UA-4FX attached: rate=%u in=%s(if %u, ep 0x%02x, mps %u) out=%s(if %u, ep 0x%02x, mps %u) midiIf=%d loc=0x%08x",
+    LOG("VS-100 attached: rate=%u in=%s(if %u, ep 0x%02x, mps %u) out=%s(if %u, ep 0x%02x, mps %u) midiIf=%d loc=0x%08x",
         rate, e->in.valid ? "yes" : "no", e->in.ifnum, e->in.epAddr, e->in.maxPacket, e->out.valid ? "yes" : "no", e->out.ifnum, e->out.epAddr, e->out.maxPacket,
         e->midiIfnum == 0xFF ? -1 : e->midiIfnum, e->locationID);
     if (e->hotplugCb) e->hotplugCb(e->hotplugCtx, true);
@@ -810,7 +825,7 @@ static void *usb_thread(void *arg) {
 
 ua4fx_engine_t *ua4fx_engine_create(void) {
     engine_t *e = calloc(1, sizeof *e);
-    e->inRing = calloc(RING, BPF); e->outRing = calloc(RING, BPF);
+    e->inRing = calloc(RING, BPFI); e->outRing = calloc(RING, BPFO);
     e->nf = UA4FX_DEFAULT_FRAMES_PER_XFER; e->nbuf = UA4FX_DEFAULT_XFERS_IN_FLIGHT; e->nbufOut = UA4FX_DEFAULT_XFERS_IN_FLIGHT_OUT; e->outLead = UA4FX_DEFAULT_OUTPUT_LEAD_MS;
     e->in.lock = OS_UNFAIR_LOCK_INIT; e->out.lock = OS_UNFAIR_LOCK_INIT;
     e->ready = dispatch_semaphore_create(0);
@@ -874,14 +889,14 @@ bool ua4fx_engine_get_zero_timestamp(engine_t *e, double *sampleTime, uint64_t *
 void ua4fx_engine_read_input(engine_t *e, int64_t sampleTime, uint32_t frames, void *dst) {
     uint8_t *d = (uint8_t *)dst; uint64_t pos = (uint64_t)sampleTime;
     uint32_t first = (uint32_t)(pos & (RING - 1)); uint32_t n1 = frames; if (first + n1 > RING) n1 = RING - first;
-    memcpy(d, e->inRing + first * BPF, n1 * BPF);
-    if (n1 < frames) memcpy(d + n1 * BPF, e->inRing, (frames - n1) * BPF);
+    memcpy(d, e->inRing + first * BPFI, n1 * BPFI);
+    if (n1 < frames) memcpy(d + n1 * BPFI, e->inRing, (frames - n1) * BPFI);
 }
 void ua4fx_engine_write_output(engine_t *e, int64_t sampleTime, uint32_t frames, const void *src) {
     const uint8_t *s = (const uint8_t *)src; uint64_t pos = (uint64_t)sampleTime;
     uint32_t first = (uint32_t)(pos & (RING - 1)); uint32_t n1 = frames; if (first + n1 > RING) n1 = RING - first;
-    memcpy(e->outRing + first * BPF, s, n1 * BPF);
-    if (n1 < frames) memcpy(e->outRing, s + n1 * BPF, (frames - n1) * BPF);
+    memcpy(e->outRing + first * BPFO, s, n1 * BPFO);
+    if (n1 < frames) memcpy(e->outRing, s + n1 * BPFO, (frames - n1) * BPFO);
 }
 
 void ua4fx_engine_get_stats(engine_t *e, ua4fx_stats_t *o) {

@@ -27,7 +27,7 @@ int main(int argc, char **argv) {
     ua4fx_engine_t *e = ua4fx_engine_create();
     if (!e) { fprintf(stderr, "engine create failed\n"); return 1; }
     for (int i = 0; i < 50 && !ua4fx_engine_device_present(e); i++) usleep(100000);
-    if (!ua4fx_engine_device_present(e)) { fprintf(stderr, "UA-4FX (advanced mode) not found\n"); ua4fx_engine_destroy(e); return 1; }
+    if (!ua4fx_engine_device_present(e)) { fprintf(stderr, "VS-100 not found\n"); ua4fx_engine_destroy(e); return 1; }
     uint32_t rate = ua4fx_engine_sample_rate(e);
     printf("device present, rate=%u serial='%s' loc=0x%08x\n", rate, ua4fx_engine_serial(e), ua4fx_engine_location_id(e));
     printf("safety in=%u out=%u zts period=%u\n", ua4fx_engine_safety_offset_input(e), ua4fx_engine_safety_offset_output(e), ua4fx_engine_zts_period(e));
@@ -39,8 +39,8 @@ int main(int argc, char **argv) {
     const double tps = ticks_per_sec();
     double phase = 0; int64_t nextOut = -1; int64_t nextIn = -1;
     double lastZts = -1; uint64_t lastHost = 0; int ztsCount = 0; double maxJitterUs = 0; double sumRate = 0; int rateN = 0;
-    double inPeak = 0; uint64_t t0 = mach_absolute_time();
-    uint8_t *obuf = malloc(buf * UA4FX_BYTES_PER_FRAME), *ibuf = malloc(buf * UA4FX_BYTES_PER_FRAME);
+    double inPeak = 0, chPeak[UA4FX_CHANNELS_IN] = {0}; uint32_t lowBytesNonZero = 0; uint64_t t0 = mach_absolute_time();
+    uint8_t *obuf = calloc(buf, UA4FX_BPF_OUT), *ibuf = calloc(buf, UA4FX_BPF_IN);
     uint32_t sOut = ua4fx_engine_safety_offset_output(e) + buf, sIn = ua4fx_engine_safety_offset_input(e) + buf;
 
     while ((double)(mach_absolute_time() - t0) / tps < seconds) {
@@ -61,13 +61,15 @@ int main(int argc, char **argv) {
         while ((double)nextOut < nowSample + sOut + buf) {
             for (uint32_t k = 0; k < buf; k++) {
                 int32_t v = silent ? 0 : (int32_t)(sin(phase) * 0.1 * 8388607.0); phase += 2 * M_PI * tone / rate;
-                uint8_t *p = obuf + k * 6; p[0] = p[3] = v & 0xff; p[1] = p[4] = (v >> 8) & 0xff; p[2] = p[5] = (v >> 16) & 0xff;
+                int32_t *f = (int32_t *)(obuf + k * UA4FX_BPF_OUT); f[0] = f[1] = v * 256;   /* tone on outputs 1+2, S32_LE */
             }
             ua4fx_engine_write_output(e, nextOut, buf, obuf); nextOut += buf;
         }
         while ((double)nextIn + buf < nowSample - sIn) {
             ua4fx_engine_read_input(e, nextIn, buf, ibuf); nextIn += buf;
-            for (uint32_t k = 0; k < buf * 2; k++) { const uint8_t *p = ibuf + k * 3; int32_t v = (int32_t)((p[0] | (p[1] << 8) | (p[2] << 16)) << 8) >> 8; double a = fabs(v / 8388607.0); if (a > inPeak) inPeak = a; }
+            for (uint32_t k = 0; k < buf; k++) for (int c = 0; c < UA4FX_CHANNELS_IN; c++) {
+                int32_t raw = ((const int32_t *)(ibuf + k * UA4FX_BPF_IN))[c]; if (raw & 0xff) lowBytesNonZero++;
+                double a = fabs(raw / 2147483648.0); if (a > inPeak) inPeak = a; if (a > chPeak[c]) chPeak[c] = a; }
         }
         usleep(2000);
     }
@@ -76,7 +78,9 @@ int main(int argc, char **argv) {
     printf("rx frames=%llu pkts=%llu err=%llu | tx frames=%llu pkts=%llu err=%llu | resyncs=%llu | measured capture rate=%.3f | fb err=%d\n",
         (unsigned long long)st.rxFrames, (unsigned long long)st.rxPackets, (unsigned long long)st.rxErrors, (unsigned long long)st.txFrames, (unsigned long long)st.txPackets,
         (unsigned long long)st.txErrors, (unsigned long long)st.resyncs, st.measuredRate, st.feedbackError);
-    printf("input peak level: %.4f (%.1f dBFS)\n", inPeak, inPeak > 0 ? 20 * log10(inPeak) : -200.0);
+    printf("input peak level: %.4f (%.1f dBFS); samples with non-zero low byte: %u\n", inPeak, inPeak > 0 ? 20 * log10(inPeak) : -200.0, lowBytesNonZero);
+    printf("per-input peak dBFS:"); for (int c = 0; c < UA4FX_CHANNELS_IN; c++) printf(" %d:%.0f", c + 1, chPeak[c] > 0 ? 20 * log10(chPeak[c]) : -200.0); printf("\n");
+    printf("rxPerBusFrame=%.4f outRate=%.4f lateFills=%u lateHarvests=%u snaps=%u\n", st.rxPerBusFrame, st.outRate, st.lateFills, st.lateHarvests, st.snaps);
     ua4fx_engine_stop(e);
     ua4fx_engine_destroy(e);
     free(obuf); free(ibuf);

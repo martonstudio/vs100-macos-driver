@@ -18,12 +18,16 @@ extern "C" {
 #endif
 
 #define UA4FX_VID           0x0582
-#define UA4FX_PID_ADVANCED  0x00A3
-#define UA4FX_PID_STANDARD  0x00A4
+#define UA4FX_PID_ADVANCED  0x00EB     /* Cakewalk/Roland V-Studio 100 (VS-100) */
 
-#define UA4FX_CHANNELS      2
-#define UA4FX_BYTES_PER_SAMPLE 3          /* 24-bit packed little-endian */
-#define UA4FX_BYTES_PER_FRAME  (UA4FX_CHANNELS * UA4FX_BYTES_PER_SAMPLE)
+/* VS-100: 6 out / 10 in, 24-bit audio in 32-bit little-endian slots (S32_LE, 24 valid MSBs), 48 kHz. */
+#define UA4FX_CHANNELS_OUT  6
+#define UA4FX_CHANNELS_IN   10
+#define UA4FX_BYTES_PER_SAMPLE 4
+#define UA4FX_BPF_OUT       (UA4FX_CHANNELS_OUT * UA4FX_BYTES_PER_SAMPLE)
+#define UA4FX_BPF_IN        (UA4FX_CHANNELS_IN  * UA4FX_BYTES_PER_SAMPLE)
+/* High-speed device: every 1 ms bus frame carries 8 microframe packets (endpoint interval 1). */
+#define UA4FX_UFRAMES_PER_MS 8
 
 /* Streaming geometry limits. One USB (full-speed) frame == 1 ms. */
 #define UA4FX_MAX_FRAMES_PER_XFER   8     /* ms of audio per isoch transfer   */
@@ -78,7 +82,7 @@ uint32_t ua4fx_engine_latency_output(ua4fx_engine_t *e);
 /* Most recent zero timestamp. Returns false if IO is not running. */
 bool ua4fx_engine_get_zero_timestamp(ua4fx_engine_t *e, double *sampleTime, uint64_t *hostTime, uint64_t *seed);
 
-/* Ring access — called from the HAL IO thread. Data is 24-bit packed LE, 6 bytes/frame. */
+/* Ring access — called from the HAL IO thread. Data is S32_LE interleaved: UA4FX_BPF_IN / UA4FX_BPF_OUT bytes per frame. */
 void ua4fx_engine_read_input (ua4fx_engine_t *e, int64_t sampleTime, uint32_t frames, void *dst);
 void ua4fx_engine_write_output(ua4fx_engine_t *e, int64_t sampleTime, uint32_t frames, const void *src);
 
