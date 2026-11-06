@@ -11,18 +11,18 @@
 #include <unistd.h>
 #include <string.h>
 static float *rec; static unsigned long recN = 0, recCap; static double rate = 48000;
-static unsigned long outPos = 0, clickPos[64]; static int nClicks = 0;
+static unsigned long clickPos[64]; static UInt32 recCh = 0; static int nClicks = 0;
 static OSStatus proc(AudioObjectID dev,const AudioTimeStamp*now,const AudioBufferList*in,const AudioTimeStamp*inT,AudioBufferList*out,const AudioTimeStamp*outT,void*c){
   (void)dev;(void)now;(void)inT;(void)outT;(void)c;
   /* record input (channel 0) indexed by input sample time */
-  for(UInt32 b=0;b<in->mNumberBuffers && b<1;b++){ const float*p=in->mBuffers[b].mData; UInt32 ch=in->mBuffers[b].mNumberChannels; UInt32 n=in->mBuffers[b].mDataByteSize/4/ch; unsigned long start=(unsigned long)inT->mSampleTime; for(UInt32 i=0;i<n;i++){ unsigned long idx=start+i; if(idx<recCap){ rec[idx]=p[i*ch]; if(idx+1>recN) recN=idx+1; } } }
+  for(UInt32 b=0;b<in->mNumberBuffers && b<1;b++){ const float*p=in->mBuffers[b].mData; UInt32 ch=in->mBuffers[b].mNumberChannels; UInt32 n=in->mBuffers[b].mDataByteSize/4/ch; unsigned long start=(unsigned long)inT->mSampleTime; for(UInt32 i=0;i<n;i++){ unsigned long idx=start+i; if(idx<recCap){ rec[idx]=p[i*ch+(recCh<ch?recCh:0)]; if(idx+1>recN) recN=idx+1; } } }
   for(UInt32 b=0;b<out->mNumberBuffers;b++){ float*p=out->mBuffers[b].mData; UInt32 ch=out->mBuffers[b].mNumberChannels; UInt32 n=out->mBuffers[b].mDataByteSize/4/ch; unsigned long start=(unsigned long)outT->mSampleTime;
     for(UInt32 i=0;i<n;i++){ unsigned long idx=start+i; float v=0; unsigned long ph=idx%((unsigned long)(rate/2)); if(ph<24) { v=0.5f*(ph<12?1.f:-1.f); if(ph==0 && nClicks<64) clickPos[nClicks++]=idx; } for(UInt32 k=0;k<ch;k++) p[i*ch+k]=v; } }
   return 0; }
-int main(int argc,char**argv){ UInt32 bs = argc>1?atoi(argv[1]):64;
+int main(int argc,char**argv){ UInt32 bs = argc>1?atoi(argv[1]):64; recCh = argc>2?(UInt32)atoi(argv[2])-1:0;   /* [bufferFrames] [input channel, 1-based] */
   AudioObjectPropertyAddress pa={kAudioHardwarePropertyDevices,kAudioObjectPropertyScopeGlobal,kAudioObjectPropertyElementMain}; UInt32 sz=0; AudioObjectGetPropertyDataSize(kAudioObjectSystemObject,&pa,0,NULL,&sz); AudioObjectID ids[64]; AudioObjectGetPropertyData(kAudioObjectSystemObject,&pa,0,NULL,&sz,ids); AudioObjectID dev=0;
-  for(UInt32 i=0;i<sz/4;i++){ CFStringRef n; UInt32 s=sizeof n; AudioObjectPropertyAddress na={kAudioDevicePropertyModelUID,kAudioObjectPropertyScopeGlobal,kAudioObjectPropertyElementMain}; if(AudioObjectGetPropertyData(ids[i],&na,0,NULL,&s,&n)==0){ char b[128]; CFStringGetCString(n,b,128,kCFStringEncodingUTF8); if(strstr(b,"UA-4FX")) dev=ids[i]; } }
-  if(!dev){printf("UA-4FX not found\n");return 1;}
+  for(UInt32 i=0;i<sz/4;i++){ CFStringRef n; UInt32 s=sizeof n; AudioObjectPropertyAddress na={kAudioDevicePropertyModelUID,kAudioObjectPropertyScopeGlobal,kAudioObjectPropertyElementMain}; if(AudioObjectGetPropertyData(ids[i],&na,0,NULL,&s,&n)==0){ char b[128]; CFStringGetCString(n,b,128,kCFStringEncodingUTF8); if(strstr(b,"VS-100")) dev=ids[i]; } }
+  if(!dev){printf("VS-100 not found\n");return 1;}
   UInt32 s=8; AudioObjectPropertyAddress ra={kAudioDevicePropertyNominalSampleRate,kAudioObjectPropertyScopeGlobal,0}; AudioObjectGetPropertyData(dev,&ra,0,NULL,&s,&rate);
   UInt32 safI,safO; s=4; AudioObjectPropertyAddress sa={kAudioDevicePropertySafetyOffset,kAudioObjectPropertyScopeInput,0}; AudioObjectGetPropertyData(dev,&sa,0,NULL,&s,&safI); sa.mScope=kAudioObjectPropertyScopeOutput; AudioObjectGetPropertyData(dev,&sa,0,NULL,&s,&safO);
   AudioObjectPropertyAddress ba={kAudioDevicePropertyBufferFrameSize,kAudioObjectPropertyScopeGlobal,0}; AudioObjectSetPropertyData(dev,&ba,0,NULL,4,&bs); s=4; AudioObjectGetPropertyData(dev,&ba,0,NULL,&s,&bs);
