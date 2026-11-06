@@ -20,8 +20,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include "../driver/UA4FX_USB.h"
-#include "../driver/UA4FX_Log.h"
+#include "../driver/VS100_USB.h"
+#include "../driver/VS100_Log.h"
 
 #define RXBUF 512
 #define NCABLES 2
@@ -137,7 +137,7 @@ static int prop_int(io_service_t s, CFStringRef key) {
 static void attach(io_service_t ifs) {
     /* Property matching on IOUSBHostInterface does not work here (every key matches nothing),
      * so the notification matches every interface and we filter on the registry properties. */
-    if (prop_int(ifs, CFSTR("idVendor")) != UA4FX_VID || prop_int(ifs, CFSTR("idProduct")) != UA4FX_PID_ADVANCED || prop_int(ifs, CFSTR("bInterfaceNumber")) != 2) return;
+    if (prop_int(ifs, CFSTR("idVendor")) != VS100_VID || prop_int(ifs, CFSTR("idProduct")) != VS100_PID_ADVANCED || prop_int(ifs, CFSTR("bInterfaceNumber")) != 2) return;
     if (gIf) return;
     IOCFPlugInInterface **plug = NULL; SInt32 score;
     IOReturn pr = IOCreatePlugInInterfaceForService(ifs, kIOUSBInterfaceUserClientTypeID, kIOCFPlugInInterfaceID, &plug, &score);
@@ -196,7 +196,7 @@ int main(void) {
 
     gNotify = IONotificationPortCreate(kIOMainPortDefault);
     CFRunLoopAddSource(CFRunLoopGetCurrent(), IONotificationPortGetRunLoopSource(gNotify), kCFRunLoopDefaultMode);
-    int vid = UA4FX_VID, pid = UA4FX_PID_ADVANCED;   /* MIDI = interface 2 (FF/01/03) */
+    int vid = VS100_VID, pid = VS100_PID_ADVANCED;   /* MIDI = interface 2 (FF/01/03) */
     CFMutableDictionaryRef m = IOServiceMatching("IOUSBHostInterface");
     CFNumberRef v = CFNumberCreate(NULL, kCFNumberIntType, &vid), p = CFNumberCreate(NULL, kCFNumberIntType, &pid);
     IOServiceAddMatchingNotification(gNotify, kIOFirstMatchNotification, m, ifaces_added, NULL, &gIfIter);

@@ -1,4 +1,4 @@
-// UA4FX Control — settings & monitoring app for the UA-4FX user-space driver.
+// VS100 Control — settings & monitoring app for the VS-100 user-space driver.
 // Talks to the HAL plug-in through two custom CoreAudio properties on the device:
 //   'uacf' config (read/write CFPropertyList dict), 'uast' stats (read-only dict).
 import SwiftUI
@@ -22,7 +22,7 @@ struct HAL {
             var uaddr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyModelUID, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
             var s: Unmanaged<CFString>? = nil
             var sz = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
-            if AudioObjectGetPropertyData(id, &uaddr, 0, nil, &sz, &s) == noErr, let str = s?.takeRetainedValue() as String?, str == "com.ua4fx.driver:UA-4FX" { return id }
+            if AudioObjectGetPropertyData(id, &uaddr, 0, nil, &sz, &s) == noErr, let str = s?.takeRetainedValue() as String?, str == "com.vs100.driver:VS-100" { return id }
         }
         return nil
     }
@@ -57,7 +57,7 @@ struct HAL {
             let ep = MIDIGetSource(i)
             var name: Unmanaged<CFString>? = nil
             MIDIObjectGetStringProperty(ep, kMIDIPropertyName, &name)
-            if let n = name?.takeRetainedValue() as String?, n == "UA-4FX MIDI In" {
+            if let n = name?.takeRetainedValue() as String?, n == "VS-100 MIDI" {
                 found = true; var off: Int32 = 1; MIDIObjectGetIntegerProperty(ep, kMIDIPropertyOffline, &off); online = off == 0
             }
         }
@@ -82,7 +82,7 @@ final class Model: ObservableObject {
     @Published var outputMute = false
     @Published var midi: (Bool, Bool) = (false, false)
     @Published var lastError = ""
-    @Published var pluginInstalled = FileManager.default.fileExists(atPath: "/Library/Audio/Plug-Ins/HAL/UA4FX.driver")
+    @Published var pluginInstalled = FileManager.default.fileExists(atPath: "/Library/Audio/Plug-Ins/HAL/VS100.driver")
     private var timer: Timer?
     private var suppress = false
 
@@ -99,7 +99,7 @@ final class Model: ObservableObject {
             if im != inputMute || om != outputMute { suppress = true; inputMute = im; outputMute = om; suppress = false }
         }
         midi = HAL.midiOnline()
-        pluginInstalled = FileManager.default.fileExists(atPath: "/Library/Audio/Plug-Ins/HAL/UA4FX.driver")
+        pluginInstalled = FileManager.default.fileExists(atPath: "/Library/Audio/Plug-Ins/HAL/VS100.driver")
     }
     func loadConfig() {
         guard let dev = device, let c = HAL.getDict(dev, kConfigSelector) else { return }
@@ -151,11 +151,11 @@ struct ContentView: View {
                 GroupBox(label: Label("Device", systemImage: "waveform")) {
                     VStack(spacing: 6) {
                         StatusRow(label: "HAL plug-in", value: m.pluginInstalled ? "installed" : "not installed", color: m.pluginInstalled ? .green : .red)
-                        StatusRow(label: "UA-4FX", value: m.device != nil ? "connected (Advanced mode)" : "not found", color: m.device != nil ? .green : .orange)
+                        StatusRow(label: "VS-100", value: m.device != nil ? "connected" : "not found", color: m.device != nil ? .green : .orange)
                         StatusRow(label: "Sample rate", value: m.device != nil ? String(format: "%.0f Hz (rear switch)", m.rate) : "–")
                         StatusRow(label: "IO", value: m.bool("running") ? "running, \(m.int("ioClients")) client(s)" : "idle", color: m.bool("running") ? .green : .secondary)
                         StatusRow(label: "Clock source", value: m.bool("running") ? (m.bool("captureMaster") ? "ADC (capture master)" : "USB SOF (playback only)") : "–")
-                        StatusRow(label: "MIDI bridge", value: m.midi.0 ? (m.midi.1 ? "UA-4FX MIDI In/Out online" : "endpoints offline") : "not running", color: m.midi.0 && m.midi.1 ? .green : .orange)
+                        StatusRow(label: "MIDI bridge", value: m.midi.0 ? (m.midi.1 ? "VS-100 MIDI + Control online" : "endpoints offline") : "not running", color: m.midi.0 && m.midi.1 ? .green : .orange)
                     }.padding(6)
                 }
 
@@ -189,7 +189,7 @@ struct ContentView: View {
                         Divider()
                         StatusRow(label: "macOS output volume", value: String(format: "%+.1f dB  →  effective %+.1f dB", m.outputVol, m.outputVol + m.outputGain))
                         StatusRow(label: "macOS input volume", value: String(format: "%+.1f dB  →  effective %+.1f dB", m.inputVol, m.inputVol + m.inputGain))
-                        Text("Trim is a fixed offset set here; the macOS volume slider / media keys move a separate 0…−60 dB control on top of it. Effective gain = trim + volume. Positive trim can clip full-scale material (hard clip at 0 dBFS). The UA-4FX's own knobs (input sens, mic gain, effects, output volume) are hardware-only and not controllable over USB.")
+                        Text("Trim is a fixed offset set here; the macOS volume slider / media keys move a separate 0…−60 dB control on top of it. Effective gain = trim + volume. Positive trim can clip full-scale material (hard clip at 0 dBFS). The VS-100's own knobs (input sens, mic gain, effects, output volume) are hardware-only and not controllable over USB.")
                             .font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
                     }.padding(6)
                 }
@@ -220,7 +220,7 @@ struct ContentView: View {
                         HStack {
                             Button("Restart coreaudiod…") { restartCoreAudio() }
                             Button("Open Audio MIDI Setup") { NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Utilities/Audio MIDI Setup.app")) }
-                            Button("Copy log command") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString("/usr/bin/log stream --predicate 'subsystem == \"com.ua4fx.driver\"' --level info", forType: .string) }
+                            Button("Copy log command") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString("/usr/bin/log stream --predicate 'subsystem == \"com.vs100.driver\"' --level info", forType: .string) }
                         }
                         if !restartMessage.isEmpty { Text(restartMessage).font(.caption).foregroundColor(.secondary) }
                         if !m.lastError.isEmpty { Text(m.lastError).font(.caption).foregroundColor(.red) }
@@ -240,10 +240,10 @@ struct ContentView: View {
 }
 
 @main
-struct UA4FXControlApp: App {
+struct VS100ControlApp: App {
     @StateObject private var model = Model()
     var body: some Scene {
-        WindowGroup("UA4FX Control") { ContentView(m: model) }
+        WindowGroup("VS100 Control") { ContentView(m: model) }
             .windowResizability(.contentSize)
     }
 }

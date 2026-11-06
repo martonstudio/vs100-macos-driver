@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>com.ua4fx.midid</string>
+	<string>com.vs100.midid</string>
 	<key>ProgramArguments</key>
 	<array>
 		<string>__MIDID__</string>
@@ -15,6 +15,6 @@
 	<key>ProcessType</key>
 	<string>Interactive</string>
 	<key>StandardErrorPath</key>
-	<string>/tmp/ua4fx_midid.log</string>
+	<string>/tmp/vs100_midid.log</string>
 </dict>
 </plist>

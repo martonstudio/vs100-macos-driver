@@ -1,6 +1,6 @@
 /*
- * rtl_test — measures the real analog round-trip latency of the UA-4FX through
- * CoreAudio: connect a cable from the UA-4FX output to its input, then run
+ * rtl_test — measures the real analog round-trip latency of the VS-100 through
+ * CoreAudio: connect a cable from the VS-100 output to its input, then run
  *   rtl_test [bufferFrames]
  * It emits a short click every 500 ms and finds it in the input stream.
  */
@@ -39,5 +39,5 @@ int main(int argc,char**argv){ UInt32 bs = argc>1?atoi(argv[1]):64; recCh = argc
     double a=fabs(rec[i-1]), b=fabs(rec[i]); double d=(double)(i-1-from)+(thr-a)/(b-a); if(getenv("RTL_VERBOSE")) printf("click %d: onset +%.2f samples\n",c,d); found++; sum+=d; if(d<mn)mn=d; if(d>mx)mx=d; }
   if(!found){ printf("clicks not detected in input\n"); return 1; }
   printf("round-trip: mean %.1f samples = %.2f ms (min %.2f, max %.2f ms) over %d clicks; jitter (max-min) %.2f samples\n", sum/found, sum/found*1000/rate, mn*1000/rate, mx*1000/rate, found, mx-mn);
-  printf("(includes ADC/DAC converter latency of the UA-4FX itself; jitter between clicks should be < 1 sample)\n");
+  printf("(includes ADC/DAC converter latency of the VS-100 itself; jitter between clicks should be < 1 sample)\n");
   return 0; }

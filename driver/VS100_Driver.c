@@ -1,14 +1,14 @@
 /*
- * UA4FX_Driver.c — CoreAudio HAL AudioServerPlugIn for the EDIROL / Roland UA-4FX
+ * VS100_Driver.c — CoreAudio HAL AudioServerPlugIn for the EDIROL / Roland VS-100
  * (Advanced mode, VID 0x0582 PID 0x00A3) on modern macOS (Apple silicon & Intel).
  *
  * Object model
  *   kAudioObjectPlugInObject (1)  — the plug-in
- *   kObjectID_Device         (2)  — "EDIROL UA-4FX", present only while the device is attached
+ *   kObjectID_Device         (2)  — "Roland VS-100", present only while the device is attached
  *   kObjectID_Stream_Input   (3)  — 2 ch capture
  *   kObjectID_Stream_Output  (4)  — 2 ch playback
  *
- * Audio flows through UA4FX_USB.c; this file only implements the HAL protocol.
+ * Audio flows through VS100_USB.c; this file only implements the HAL protocol.
  * Streams are exposed to the HAL as 32-bit float (converted here to/from the
  * device's native 24-bit packed PCM). The sample rate is whatever the rear
  * switch of the unit selects (44.1 / 48 / 96 kHz); it cannot be changed over USB.
@@ -21,8 +21,8 @@
 #include <math.h>
 #include <stdatomic.h>
 
-#include "UA4FX_USB.h"
-#include "UA4FX_Log.h"
+#include "VS100_USB.h"
+#include "VS100_Log.h"
 
 enum {
     kObjectID_PlugIn        = kAudioObjectPlugInObject,
@@ -39,17 +39,17 @@ enum {
 
 #define kDevice_Name          "V-Studio 100"
 #define kDevice_Manufacturer  "Roland / Cakewalk"
-#define kDevice_ModelUID      "com.ua4fx.driver:VS-100"
-#define kPlugIn_BundleID      "com.ua4fx.driver"
-#define kChannelsOut          UA4FX_CHANNELS_OUT
-#define kChannelsIn           UA4FX_CHANNELS_IN
+#define kDevice_ModelUID      "com.vs100.driver:VS-100"
+#define kPlugIn_BundleID      "com.vs100.driver"
+#define kChannelsOut          VS100_CHANNELS_OUT
+#define kChannelsIn           VS100_CHANNELS_IN
 #define kChannelsFor(isIn)    ((isIn) ? kChannelsIn : kChannelsOut)
 
 /* ------------------------------------------------------------------------- */
 /* state                                                                      */
 
 static AudioServerPlugInHostRef gHost = NULL;
-static ua4fx_engine_t *gEngine = NULL;
+static vs100_engine_t *gEngine = NULL;
 static pthread_mutex_t gStateMutex = PTHREAD_MUTEX_INITIALIZER;
 static UInt32  gIOCount = 0;
 static atomic_bool gDevicePresent;
@@ -64,45 +64,45 @@ static double gInputVolDB = 0.0, gOutputVolDB = 0.0;          /* macOS volume sl
 static Boolean gInputMute = false, gOutputMute = false;
 #define kTrim_MinDB (-24.0)
 #define kTrim_MaxDB (24.0)
-static ua4fx_config_t gPendingConfig;                          /* geometry waiting for PerformDeviceConfigurationChange */
+static vs100_config_t gPendingConfig;                          /* geometry waiting for PerformDeviceConfigurationChange */
 
 /* Custom properties (kAudioServerPlugInCustomPropertyDataTypeCFPropertyList) on the device object */
-#define kUA4FX_Property_Config  'uacf'   /* dict, read/write: framesPerXfer, xfersInFlight, inputGainDB, outputGainDB, inputMute, outputMute */
-#define kUA4FX_Property_Stats   'uast'   /* dict, read-only: live engine statistics */
-#define kUA4FX_Storage_Config   CFSTR("config")
+#define kVS100_Property_Config  'uacf'   /* dict, read/write: framesPerXfer, xfersInFlight, inputGainDB, outputGainDB, inputMute, outputMute */
+#define kVS100_Property_Stats   'uast'   /* dict, read-only: live engine statistics */
+#define kVS100_Storage_Config   CFSTR("config")
 #define kChangeAction_Geometry  1
 
 /* forward */
-static HRESULT  UA4FX_QueryInterface(void *inDriver, REFIID inUUID, LPVOID *outInterface);
-static ULONG    UA4FX_AddRef(void *inDriver);
-static ULONG    UA4FX_Release(void *inDriver);
-static OSStatus UA4FX_Initialize(AudioServerPlugInDriverRef inDriver, AudioServerPlugInHostRef inHost);
-static OSStatus UA4FX_CreateDevice(AudioServerPlugInDriverRef inDriver, CFDictionaryRef inDescription, const AudioServerPlugInClientInfo *inClientInfo, AudioObjectID *outDeviceObjectID);
-static OSStatus UA4FX_DestroyDevice(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID);
-static OSStatus UA4FX_AddDeviceClient(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, const AudioServerPlugInClientInfo *inClientInfo);
-static OSStatus UA4FX_RemoveDeviceClient(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, const AudioServerPlugInClientInfo *inClientInfo);
-static OSStatus UA4FX_PerformDeviceConfigurationChange(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt64 inChangeAction, void *inChangeInfo);
-static OSStatus UA4FX_AbortDeviceConfigurationChange(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt64 inChangeAction, void *inChangeInfo);
-static Boolean  UA4FX_HasProperty(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress *inAddress);
-static OSStatus UA4FX_IsPropertySettable(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress *inAddress, Boolean *outIsSettable);
-static OSStatus UA4FX_GetPropertyDataSize(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress *inAddress, UInt32 inQualifierDataSize, const void *inQualifierData, UInt32 *outDataSize);
-static OSStatus UA4FX_GetPropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress *inAddress, UInt32 inQualifierDataSize, const void *inQualifierData, UInt32 inDataSize, UInt32 *outDataSize, void *outData);
-static OSStatus UA4FX_SetPropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress *inAddress, UInt32 inQualifierDataSize, const void *inQualifierData, UInt32 inDataSize, const void *inData);
-static OSStatus UA4FX_StartIO(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID);
-static OSStatus UA4FX_StopIO(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID);
-static OSStatus UA4FX_GetZeroTimeStamp(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, Float64 *outSampleTime, UInt64 *outHostTime, UInt64 *outSeed);
-static OSStatus UA4FX_WillDoIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, UInt32 inOperationID, Boolean *outWillDo, Boolean *outWillDoInPlace);
-static OSStatus UA4FX_BeginIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, UInt32 inOperationID, UInt32 inIOBufferFrameSize, const AudioServerPlugInIOCycleInfo *inIOCycleInfo);
-static OSStatus UA4FX_DoIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, AudioObjectID inStreamObjectID, UInt32 inClientID, UInt32 inOperationID, UInt32 inIOBufferFrameSize, const AudioServerPlugInIOCycleInfo *inIOCycleInfo, void *ioMainBuffer, void *ioSecondaryBuffer);
-static OSStatus UA4FX_EndIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, UInt32 inOperationID, UInt32 inIOBufferFrameSize, const AudioServerPlugInIOCycleInfo *inIOCycleInfo);
+static HRESULT  VS100_QueryInterface(void *inDriver, REFIID inUUID, LPVOID *outInterface);
+static ULONG    VS100_AddRef(void *inDriver);
+static ULONG    VS100_Release(void *inDriver);
+static OSStatus VS100_Initialize(AudioServerPlugInDriverRef inDriver, AudioServerPlugInHostRef inHost);
+static OSStatus VS100_CreateDevice(AudioServerPlugInDriverRef inDriver, CFDictionaryRef inDescription, const AudioServerPlugInClientInfo *inClientInfo, AudioObjectID *outDeviceObjectID);
+static OSStatus VS100_DestroyDevice(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID);
+static OSStatus VS100_AddDeviceClient(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, const AudioServerPlugInClientInfo *inClientInfo);
+static OSStatus VS100_RemoveDeviceClient(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, const AudioServerPlugInClientInfo *inClientInfo);
+static OSStatus VS100_PerformDeviceConfigurationChange(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt64 inChangeAction, void *inChangeInfo);
+static OSStatus VS100_AbortDeviceConfigurationChange(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt64 inChangeAction, void *inChangeInfo);
+static Boolean  VS100_HasProperty(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress *inAddress);
+static OSStatus VS100_IsPropertySettable(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress *inAddress, Boolean *outIsSettable);
+static OSStatus VS100_GetPropertyDataSize(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress *inAddress, UInt32 inQualifierDataSize, const void *inQualifierData, UInt32 *outDataSize);
+static OSStatus VS100_GetPropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress *inAddress, UInt32 inQualifierDataSize, const void *inQualifierData, UInt32 inDataSize, UInt32 *outDataSize, void *outData);
+static OSStatus VS100_SetPropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress *inAddress, UInt32 inQualifierDataSize, const void *inQualifierData, UInt32 inDataSize, const void *inData);
+static OSStatus VS100_StartIO(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID);
+static OSStatus VS100_StopIO(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID);
+static OSStatus VS100_GetZeroTimeStamp(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, Float64 *outSampleTime, UInt64 *outHostTime, UInt64 *outSeed);
+static OSStatus VS100_WillDoIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, UInt32 inOperationID, Boolean *outWillDo, Boolean *outWillDoInPlace);
+static OSStatus VS100_BeginIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, UInt32 inOperationID, UInt32 inIOBufferFrameSize, const AudioServerPlugInIOCycleInfo *inIOCycleInfo);
+static OSStatus VS100_DoIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, AudioObjectID inStreamObjectID, UInt32 inClientID, UInt32 inOperationID, UInt32 inIOBufferFrameSize, const AudioServerPlugInIOCycleInfo *inIOCycleInfo, void *ioMainBuffer, void *ioSecondaryBuffer);
+static OSStatus VS100_EndIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, UInt32 inOperationID, UInt32 inIOBufferFrameSize, const AudioServerPlugInIOCycleInfo *inIOCycleInfo);
 
 static AudioServerPlugInDriverInterface gDriverInterface = {
     NULL,
-    UA4FX_QueryInterface, UA4FX_AddRef, UA4FX_Release,
-    UA4FX_Initialize, UA4FX_CreateDevice, UA4FX_DestroyDevice, UA4FX_AddDeviceClient, UA4FX_RemoveDeviceClient,
-    UA4FX_PerformDeviceConfigurationChange, UA4FX_AbortDeviceConfigurationChange,
-    UA4FX_HasProperty, UA4FX_IsPropertySettable, UA4FX_GetPropertyDataSize, UA4FX_GetPropertyData, UA4FX_SetPropertyData,
-    UA4FX_StartIO, UA4FX_StopIO, UA4FX_GetZeroTimeStamp, UA4FX_WillDoIOOperation, UA4FX_BeginIOOperation, UA4FX_DoIOOperation, UA4FX_EndIOOperation
+    VS100_QueryInterface, VS100_AddRef, VS100_Release,
+    VS100_Initialize, VS100_CreateDevice, VS100_DestroyDevice, VS100_AddDeviceClient, VS100_RemoveDeviceClient,
+    VS100_PerformDeviceConfigurationChange, VS100_AbortDeviceConfigurationChange,
+    VS100_HasProperty, VS100_IsPropertySettable, VS100_GetPropertyDataSize, VS100_GetPropertyData, VS100_SetPropertyData,
+    VS100_StartIO, VS100_StopIO, VS100_GetZeroTimeStamp, VS100_WillDoIOOperation, VS100_BeginIOOperation, VS100_DoIOOperation, VS100_EndIOOperation
 };
 static AudioServerPlugInDriverInterface *gDriverInterfacePtr = &gDriverInterface;
 static AudioServerPlugInDriverRef gDriverRef = &gDriverInterfacePtr;
@@ -111,14 +111,14 @@ static ULONG gRefCount = 0;
 /* ------------------------------------------------------------------------- */
 /* factory / COM                                                              */
 
-void *UA4FX_Create(CFAllocatorRef inAllocator, CFUUIDRef inRequestedTypeUUID);
-void *UA4FX_Create(CFAllocatorRef inAllocator, CFUUIDRef inRequestedTypeUUID) {
+void *VS100_Create(CFAllocatorRef inAllocator, CFUUIDRef inRequestedTypeUUID);
+void *VS100_Create(CFAllocatorRef inAllocator, CFUUIDRef inRequestedTypeUUID) {
     (void)inAllocator;
     if (CFEqual(inRequestedTypeUUID, kAudioServerPlugInTypeUUID)) return gDriverRef;
     return NULL;
 }
 
-static HRESULT UA4FX_QueryInterface(void *inDriver, REFIID inUUID, LPVOID *outInterface) {
+static HRESULT VS100_QueryInterface(void *inDriver, REFIID inUUID, LPVOID *outInterface) {
     if (inDriver != gDriverRef || !outInterface) return E_INVALIDARG;
     CFUUIDRef uuid = CFUUIDCreateFromUUIDBytes(NULL, inUUID);
     if (!uuid) return E_INVALIDARG;
@@ -127,8 +127,8 @@ static HRESULT UA4FX_QueryInterface(void *inDriver, REFIID inUUID, LPVOID *outIn
     if (!ok) { *outInterface = NULL; return E_NOINTERFACE; }
     ++gRefCount; *outInterface = gDriverRef; return S_OK;
 }
-static ULONG UA4FX_AddRef(void *inDriver)  { (void)inDriver; return ++gRefCount; }
-static ULONG UA4FX_Release(void *inDriver) { (void)inDriver; if (gRefCount > 0) --gRefCount; return gRefCount; }
+static ULONG VS100_AddRef(void *inDriver)  { (void)inDriver; return ++gRefCount; }
+static ULONG VS100_Release(void *inDriver) { (void)inDriver; if (gRefCount > 0) --gRefCount; return gRefCount; }
 
 /* ------------------------------------------------------------------------- */
 /* hot-plug                                                                   */
@@ -146,11 +146,11 @@ static void hotplug(void *ctx, bool arrived) {
     (void)ctx;
     pthread_mutex_lock(&gStateMutex);
     if (arrived) {
-        gSampleRate = (Float64)ua4fx_engine_sample_rate(gEngine);
+        gSampleRate = (Float64)vs100_engine_sample_rate(gEngine);
         if (gDeviceUID) CFRelease(gDeviceUID);
-        const char *serial = ua4fx_engine_serial(gEngine);
-        if (serial && serial[0]) gDeviceUID = CFStringCreateWithFormat(NULL, NULL, CFSTR("UA4FX:%s"), serial);
-        else gDeviceUID = CFStringCreateWithFormat(NULL, NULL, CFSTR("UA4FX:loc%08x"), ua4fx_engine_location_id(gEngine));
+        const char *serial = vs100_engine_serial(gEngine);
+        if (serial && serial[0]) gDeviceUID = CFStringCreateWithFormat(NULL, NULL, CFSTR("VS100:%s"), serial);
+        else gDeviceUID = CFStringCreateWithFormat(NULL, NULL, CFSTR("VS100:loc%08x"), vs100_engine_location_id(gEngine));
         atomic_store(&gDevicePresent, true);
         LOG("HAL: device arrived, rate %.0f", gSampleRate);
     } else {
@@ -184,7 +184,7 @@ static void notify_controls(void) {
     AudioObjectPropertyAddress lv[2] = { { kAudioLevelControlPropertyScalarValue, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain },
                                          { kAudioLevelControlPropertyDecibelValue, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain } };
     AudioObjectPropertyAddress bv = { kAudioBooleanControlPropertyValue, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
-    AudioObjectPropertyAddress cfg = { kUA4FX_Property_Config, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    AudioObjectPropertyAddress cfg = { kVS100_Property_Config, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
     gHost->PropertiesChanged(gHost, kObjectID_Volume_Output, 2, lv);
     gHost->PropertiesChanged(gHost, kObjectID_Volume_Input, 2, lv);
     gHost->PropertiesChanged(gHost, kObjectID_Mute_Output, 1, &bv);
@@ -195,7 +195,7 @@ static void notify_controls(void) {
 static Float32 db_to_scalar(double db) { if (db <= kVolume_MinDB) return 0.0f; if (db >= kVolume_MaxDB) return 1.0f; return (Float32)((db - kVolume_MinDB) / (kVolume_MaxDB - kVolume_MinDB)); }
 static double scalar_to_db(Float32 s) { if (s <= 0) return kVolume_MinDB; if (s >= 1) return kVolume_MaxDB; return kVolume_MinDB + (kVolume_MaxDB - kVolume_MinDB) * (double)s; }
 static CFDictionaryRef copy_config_dict(void) {
-    ua4fx_config_t c; ua4fx_engine_get_config(gEngine, &c);
+    vs100_config_t c; vs100_engine_get_config(gEngine, &c);
     CFMutableDictionaryRef d = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     CFNumberRef n;
     n = num_i((int)c.framesPerXfer); CFDictionarySetValue(d, CFSTR("framesPerXfer"), n); CFRelease(n);
@@ -222,15 +222,15 @@ static Boolean apply_config_dict(CFDictionaryRef d) {
     if (dict_get_d(d, CFSTR("inputMute"), &v))    gInputMute  = v != 0;
     if (dict_get_d(d, CFSTR("outputMute"), &v))   gOutputMute = v != 0;
     apply_gains();
-    ua4fx_config_t cur; ua4fx_engine_get_config(gEngine, &cur);
-    ua4fx_config_t want = cur;
+    vs100_config_t cur; vs100_engine_get_config(gEngine, &cur);
+    vs100_config_t want = cur;
     if (dict_get_d(d, CFSTR("framesPerXfer"), &v)) want.framesPerXfer = (uint32_t)v;
     if (dict_get_d(d, CFSTR("xfersInFlight"), &v)) want.xfersInFlight = (uint32_t)v;
     if (dict_get_d(d, CFSTR("xfersInFlightOut"), &v)) want.xfersInFlightOut = (uint32_t)v;
     if (dict_get_d(d, CFSTR("outputLeadMs"), &v)) want.outputLeadMs = (uint32_t)v;
-    if (want.framesPerXfer < 1) want.framesPerXfer = 1; if (want.framesPerXfer > UA4FX_MAX_FRAMES_PER_XFER) want.framesPerXfer = UA4FX_MAX_FRAMES_PER_XFER;
-    if (want.xfersInFlight < 2) want.xfersInFlight = 2; if (want.xfersInFlight > UA4FX_MAX_XFERS_IN_FLIGHT) want.xfersInFlight = UA4FX_MAX_XFERS_IN_FLIGHT;
-    if (want.xfersInFlightOut < 2) want.xfersInFlightOut = 2; if (want.xfersInFlightOut > UA4FX_MAX_XFERS_IN_FLIGHT) want.xfersInFlightOut = UA4FX_MAX_XFERS_IN_FLIGHT;
+    if (want.framesPerXfer < 1) want.framesPerXfer = 1; if (want.framesPerXfer > VS100_MAX_FRAMES_PER_XFER) want.framesPerXfer = VS100_MAX_FRAMES_PER_XFER;
+    if (want.xfersInFlight < 2) want.xfersInFlight = 2; if (want.xfersInFlight > VS100_MAX_XFERS_IN_FLIGHT) want.xfersInFlight = VS100_MAX_XFERS_IN_FLIGHT;
+    if (want.xfersInFlightOut < 2) want.xfersInFlightOut = 2; if (want.xfersInFlightOut > VS100_MAX_XFERS_IN_FLIGHT) want.xfersInFlightOut = VS100_MAX_XFERS_IN_FLIGHT;
     if (want.outputLeadMs < 1) want.outputLeadMs = 1; if (want.outputLeadMs > want.xfersInFlightOut * want.framesPerXfer - 1) want.outputLeadMs = want.xfersInFlightOut * want.framesPerXfer - 1;
     if (want.framesPerXfer != cur.framesPerXfer || want.xfersInFlight != cur.xfersInFlight || want.xfersInFlightOut != cur.xfersInFlightOut || want.outputLeadMs != cur.outputLeadMs) { gPendingConfig = want; return true; }
     return false;
@@ -238,11 +238,11 @@ static Boolean apply_config_dict(CFDictionaryRef d) {
 static void save_config(void) {
     if (!gHost) return;
     CFDictionaryRef d = copy_config_dict();
-    gHost->WriteToStorage(gHost, kUA4FX_Storage_Config, d);
+    gHost->WriteToStorage(gHost, kVS100_Storage_Config, d);
     CFRelease(d);
 }
 static CFDictionaryRef copy_stats_dict(void) {
-    ua4fx_stats_t st; ua4fx_engine_get_stats(gEngine, &st);
+    vs100_stats_t st; vs100_engine_get_stats(gEngine, &st);
     CFMutableDictionaryRef d = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     CFNumberRef n;
 #define PUT_I(k, v) do { n = num_i((int)(v)); CFDictionarySetValue(d, CFSTR(k), n); CFRelease(n); } while (0)
@@ -256,8 +256,8 @@ static CFDictionaryRef copy_stats_dict(void) {
     PUT_I("framesPerXfer", st.framesPerXfer); PUT_I("xfersInFlight", st.xfersInFlight); PUT_I("xfersInFlightOut", st.xfersInFlightOut); PUT_I("outputLeadMs", st.outputLeadMs);
     PUT_I("lateFills", st.lateFills); PUT_I("lateHarvests", st.lateHarvests);
     PUT_D("harvestLagMaxUs", st.harvestLagMaxUs); PUT_D("harvestedByPoll", st.harvestedByPoll); PUT_D("harvestedByCallback", st.harvestedByCallback);
-    PUT_I("safetyOffsetInput", ua4fx_engine_safety_offset_input(gEngine));
-    PUT_I("safetyOffsetOutput", ua4fx_engine_safety_offset_output(gEngine));
+    PUT_I("safetyOffsetInput", vs100_engine_safety_offset_input(gEngine));
+    PUT_I("safetyOffsetOutput", vs100_engine_safety_offset_output(gEngine));
     PUT_D("rxFrames", st.rxFrames); PUT_D("txFrames", st.txFrames);
     PUT_D("rxPackets", st.rxPackets); PUT_D("txPackets", st.txPackets);
     PUT_D("rxErrors", st.rxErrors); PUT_D("txErrors", st.txErrors); PUT_D("resyncs", st.resyncs);
@@ -275,65 +275,65 @@ static CFDictionaryRef copy_stats_dict(void) {
 /* ------------------------------------------------------------------------- */
 /* basic operations                                                           */
 
-static OSStatus UA4FX_Initialize(AudioServerPlugInDriverRef inDriver, AudioServerPlugInHostRef inHost) {
+static OSStatus VS100_Initialize(AudioServerPlugInDriverRef inDriver, AudioServerPlugInHostRef inHost) {
     if (inDriver != gDriverRef) return kAudioHardwareBadObjectError;
     gHost = inHost;
-    gEngine = ua4fx_engine_create();
+    gEngine = vs100_engine_create();
     if (!gEngine) { LOGE("engine creation failed"); return kAudioHardwareUnspecifiedError; }
-    ua4fx_engine_set_hotplug_callback(gEngine, hotplug, NULL);
+    vs100_engine_set_hotplug_callback(gEngine, hotplug, NULL);
     apply_gains();
     { CFPropertyListRef stored = NULL;
-      if (gHost->CopyFromStorage(gHost, kUA4FX_Storage_Config, &stored) == 0 && stored) {
+      if (gHost->CopyFromStorage(gHost, kVS100_Storage_Config, &stored) == 0 && stored) {
           if (CFGetTypeID(stored) == CFDictionaryGetTypeID()) {
               if (apply_config_dict(stored)) {
                   /* v0.2/v0.3 shipped 1 ms x 3 / x 5 with a shared depth; migrate to the split defaults */
-                  if (gPendingConfig.framesPerXfer == 1 && gPendingConfig.xfersInFlight < 8) gPendingConfig.xfersInFlight = UA4FX_DEFAULT_XFERS_IN_FLIGHT;
-                  if (!CFDictionaryContainsKey(stored, CFSTR("xfersInFlightOut"))) gPendingConfig.xfersInFlightOut = UA4FX_DEFAULT_XFERS_IN_FLIGHT_OUT;
-                  if (!CFDictionaryContainsKey(stored, CFSTR("outputLeadMs"))) gPendingConfig.outputLeadMs = UA4FX_DEFAULT_OUTPUT_LEAD_MS;
-                  ua4fx_engine_set_config(gEngine, &gPendingConfig);
+                  if (gPendingConfig.framesPerXfer == 1 && gPendingConfig.xfersInFlight < 8) gPendingConfig.xfersInFlight = VS100_DEFAULT_XFERS_IN_FLIGHT;
+                  if (!CFDictionaryContainsKey(stored, CFSTR("xfersInFlightOut"))) gPendingConfig.xfersInFlightOut = VS100_DEFAULT_XFERS_IN_FLIGHT_OUT;
+                  if (!CFDictionaryContainsKey(stored, CFSTR("outputLeadMs"))) gPendingConfig.outputLeadMs = VS100_DEFAULT_OUTPUT_LEAD_MS;
+                  vs100_engine_set_config(gEngine, &gPendingConfig);
               }
           }
           CFRelease(stored);
       } }
     /* the engine may already have found the device during creation */
-    if (ua4fx_engine_device_present(gEngine) && !atomic_load(&gDevicePresent)) hotplug(NULL, true);
+    if (vs100_engine_device_present(gEngine) && !atomic_load(&gDevicePresent)) hotplug(NULL, true);
     LOG("HAL: plug-in initialized (device %s)", atomic_load(&gDevicePresent) ? "present" : "absent");
     return 0;
 }
 
-static OSStatus UA4FX_CreateDevice(AudioServerPlugInDriverRef inDriver, CFDictionaryRef inDescription, const AudioServerPlugInClientInfo *inClientInfo, AudioObjectID *outDeviceObjectID) {
+static OSStatus VS100_CreateDevice(AudioServerPlugInDriverRef inDriver, CFDictionaryRef inDescription, const AudioServerPlugInClientInfo *inClientInfo, AudioObjectID *outDeviceObjectID) {
     (void)inDriver; (void)inDescription; (void)inClientInfo; (void)outDeviceObjectID;
     return kAudioHardwareUnsupportedOperationError;
 }
-static OSStatus UA4FX_DestroyDevice(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID) {
+static OSStatus VS100_DestroyDevice(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID) {
     (void)inDriver; (void)inDeviceObjectID; return kAudioHardwareUnsupportedOperationError;
 }
-static OSStatus UA4FX_AddDeviceClient(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, const AudioServerPlugInClientInfo *inClientInfo) {
+static OSStatus VS100_AddDeviceClient(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, const AudioServerPlugInClientInfo *inClientInfo) {
     (void)inDriver; (void)inDeviceObjectID; (void)inClientInfo; return 0;
 }
-static OSStatus UA4FX_RemoveDeviceClient(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, const AudioServerPlugInClientInfo *inClientInfo) {
+static OSStatus VS100_RemoveDeviceClient(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, const AudioServerPlugInClientInfo *inClientInfo) {
     (void)inDriver; (void)inDeviceObjectID; (void)inClientInfo; return 0;
 }
-static OSStatus UA4FX_PerformDeviceConfigurationChange(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt64 inChangeAction, void *inChangeInfo) {
+static OSStatus VS100_PerformDeviceConfigurationChange(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt64 inChangeAction, void *inChangeInfo) {
     (void)inChangeInfo;
     if (inDriver != gDriverRef || inDeviceObjectID != kObjectID_Device) return kAudioHardwareBadObjectError;
     if (inChangeAction == kChangeAction_Geometry) {
         /* the host has stopped IO on this device; the engine picks the new geometry up at the next start */
         pthread_mutex_lock(&gStateMutex);
-        ua4fx_engine_set_config(gEngine, &gPendingConfig);
+        vs100_engine_set_config(gEngine, &gPendingConfig);
         pthread_mutex_unlock(&gStateMutex);
         LOG("HAL: geometry changed to %u ms, in x %u, out x %u, lead %u ms", gPendingConfig.framesPerXfer, gPendingConfig.xfersInFlight, gPendingConfig.xfersInFlightOut, gPendingConfig.outputLeadMs);
         save_config();
         AudioObjectPropertyAddress addrs[4] = {
             { kAudioDevicePropertySafetyOffset, kAudioObjectPropertyScopeInput,  kAudioObjectPropertyElementMain },
             { kAudioDevicePropertySafetyOffset, kAudioObjectPropertyScopeOutput, kAudioObjectPropertyElementMain },
-            { kUA4FX_Property_Config,           kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain },
-            { kUA4FX_Property_Stats,            kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain } };
+            { kVS100_Property_Config,           kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain },
+            { kVS100_Property_Stats,            kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain } };
         gHost->PropertiesChanged(gHost, kObjectID_Device, 4, addrs);
     }
     return 0;
 }
-static OSStatus UA4FX_AbortDeviceConfigurationChange(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt64 inChangeAction, void *inChangeInfo) {
+static OSStatus VS100_AbortDeviceConfigurationChange(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt64 inChangeAction, void *inChangeInfo) {
     (void)inDriver; (void)inDeviceObjectID; (void)inChangeAction; (void)inChangeInfo; return 0;
 }
 
@@ -381,7 +381,7 @@ static Boolean device_has(const AudioObjectPropertyAddress *a) {
         case kAudioDevicePropertyNominalSampleRate: case kAudioDevicePropertyAvailableNominalSampleRates:
         case kAudioDevicePropertyIsHidden: case kAudioDevicePropertyZeroTimeStampPeriod:
         case kAudioDevicePropertyClockAlgorithm: case kAudioDevicePropertyClockIsStable:
-        case kAudioObjectPropertyCustomPropertyInfoList: case kUA4FX_Property_Config: case kUA4FX_Property_Stats:
+        case kAudioObjectPropertyCustomPropertyInfoList: case kVS100_Property_Config: case kVS100_Property_Stats:
             return true;
         case kAudioDevicePropertyPreferredChannelsForStereo: case kAudioDevicePropertyPreferredChannelLayout:
             return a->mScope == kAudioObjectPropertyScopeInput || a->mScope == kAudioObjectPropertyScopeOutput;
@@ -418,7 +418,7 @@ static Boolean control_has(AudioObjectID id, const AudioObjectPropertyAddress *a
     return false;
 }
 
-static Boolean UA4FX_HasProperty(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress *inAddress) {
+static Boolean VS100_HasProperty(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress *inAddress) {
     (void)inClientProcessID;
     if (inDriver != gDriverRef || !inAddress) return false;
     switch (inObjectID) {
@@ -430,11 +430,11 @@ static Boolean UA4FX_HasProperty(AudioServerPlugInDriverRef inDriver, AudioObjec
     return false;
 }
 
-static OSStatus UA4FX_IsPropertySettable(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress *inAddress, Boolean *outIsSettable) {
+static OSStatus VS100_IsPropertySettable(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress *inAddress, Boolean *outIsSettable) {
     if (inDriver != gDriverRef || !inAddress || !outIsSettable) return kAudioHardwareIllegalOperationError;
-    if (!UA4FX_HasProperty(inDriver, inObjectID, inClientProcessID, inAddress)) return kAudioHardwareUnknownPropertyError;
+    if (!VS100_HasProperty(inDriver, inObjectID, inClientProcessID, inAddress)) return kAudioHardwareUnknownPropertyError;
     *outIsSettable = false;
-    if (inObjectID == kObjectID_Device && (inAddress->mSelector == kAudioDevicePropertyNominalSampleRate || inAddress->mSelector == kUA4FX_Property_Config)) *outIsSettable = true;
+    if (inObjectID == kObjectID_Device && (inAddress->mSelector == kAudioDevicePropertyNominalSampleRate || inAddress->mSelector == kVS100_Property_Config)) *outIsSettable = true;
     if (is_stream(inObjectID) && (inAddress->mSelector == kAudioStreamPropertyIsActive || inAddress->mSelector == kAudioStreamPropertyVirtualFormat || inAddress->mSelector == kAudioStreamPropertyPhysicalFormat)) *outIsSettable = true;
     if (is_volume(inObjectID) && (inAddress->mSelector == kAudioLevelControlPropertyScalarValue || inAddress->mSelector == kAudioLevelControlPropertyDecibelValue)) *outIsSettable = true;
     if (is_mute(inObjectID) && inAddress->mSelector == kAudioBooleanControlPropertyValue) *outIsSettable = true;
@@ -516,9 +516,9 @@ static OSStatus get_property(AudioObjectID inObjectID, const AudioObjectProperty
             case kAudioDevicePropertyDeviceCanBeDefaultDevice: REQUIRE(sizeof(UInt32)); *(UInt32 *)outData = 1; return 0;
             case kAudioDevicePropertyDeviceCanBeDefaultSystemDevice: REQUIRE(sizeof(UInt32)); *(UInt32 *)outData = 1; return 0;
             case kAudioDevicePropertyLatency: REQUIRE(sizeof(UInt32));
-                *(UInt32 *)outData = a->mScope == kAudioObjectPropertyScopeInput ? ua4fx_engine_latency_input(gEngine) : ua4fx_engine_latency_output(gEngine); return 0;
+                *(UInt32 *)outData = a->mScope == kAudioObjectPropertyScopeInput ? vs100_engine_latency_input(gEngine) : vs100_engine_latency_output(gEngine); return 0;
             case kAudioDevicePropertySafetyOffset: REQUIRE(sizeof(UInt32));
-                *(UInt32 *)outData = a->mScope == kAudioObjectPropertyScopeInput ? ua4fx_engine_safety_offset_input(gEngine) : ua4fx_engine_safety_offset_output(gEngine); return 0;
+                *(UInt32 *)outData = a->mScope == kAudioObjectPropertyScopeInput ? vs100_engine_safety_offset_input(gEngine) : vs100_engine_safety_offset_output(gEngine); return 0;
             case kAudioDevicePropertyNominalSampleRate: REQUIRE(sizeof(Float64)); *(Float64 *)outData = gSampleRate; return 0;
             case kAudioDevicePropertyAvailableNominalSampleRates: {
                 if (!outData) { *outDataSize = sizeof(AudioValueRange); return 0; }
@@ -526,19 +526,19 @@ static OSStatus get_property(AudioObjectID inObjectID, const AudioObjectProperty
                 AudioValueRange *r = (AudioValueRange *)outData; r->mMinimum = r->mMaximum = gSampleRate; *outDataSize = sizeof(AudioValueRange); return 0;
             }
             case kAudioDevicePropertyIsHidden: REQUIRE(sizeof(UInt32)); *(UInt32 *)outData = 0; return 0;
-            case kAudioDevicePropertyZeroTimeStampPeriod: REQUIRE(sizeof(UInt32)); *(UInt32 *)outData = ua4fx_engine_zts_period(gEngine); return 0;
+            case kAudioDevicePropertyZeroTimeStampPeriod: REQUIRE(sizeof(UInt32)); *(UInt32 *)outData = vs100_engine_zts_period(gEngine); return 0;
             case kAudioDevicePropertyClockAlgorithm: REQUIRE(sizeof(UInt32)); *(UInt32 *)outData = kAudioDeviceClockAlgorithm12PtMovingWindowAverage; return 0;
             case kAudioDevicePropertyClockIsStable: REQUIRE(sizeof(UInt32)); *(UInt32 *)outData = 1; return 0;
             case kAudioObjectPropertyCustomPropertyInfoList: {
                 AudioServerPlugInCustomPropertyInfo info[2] = {
-                    { kUA4FX_Property_Config, kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone },
-                    { kUA4FX_Property_Stats,  kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone } };
+                    { kVS100_Property_Config, kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone },
+                    { kVS100_Property_Stats,  kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone } };
                 if (!outData) { *outDataSize = sizeof info; return 0; }
                 UInt32 n = inDataSize / sizeof(AudioServerPlugInCustomPropertyInfo); if (n > 2) n = 2;
                 memcpy(outData, info, n * sizeof(AudioServerPlugInCustomPropertyInfo)); *outDataSize = n * sizeof(AudioServerPlugInCustomPropertyInfo); return 0;
             }
-            case kUA4FX_Property_Config: REQUIRE(sizeof(CFPropertyListRef)); *(CFPropertyListRef *)outData = copy_config_dict(); return 0;
-            case kUA4FX_Property_Stats:  REQUIRE(sizeof(CFPropertyListRef)); *(CFPropertyListRef *)outData = copy_stats_dict(); return 0;
+            case kVS100_Property_Config: REQUIRE(sizeof(CFPropertyListRef)); *(CFPropertyListRef *)outData = copy_config_dict(); return 0;
+            case kVS100_Property_Stats:  REQUIRE(sizeof(CFPropertyListRef)); *(CFPropertyListRef *)outData = copy_stats_dict(); return 0;
             case kAudioDevicePropertyPreferredChannelsForStereo: REQUIRE(2 * sizeof(UInt32)); ((UInt32 *)outData)[0] = 1; ((UInt32 *)outData)[1] = 2; return 0;
             case kAudioDevicePropertyPreferredChannelLayout: {
                 const UInt32 kChannels = kChannelsFor(a->mScope == kAudioObjectPropertyScopeInput);
@@ -604,22 +604,22 @@ static OSStatus get_property(AudioObjectID inObjectID, const AudioObjectProperty
     return kAudioHardwareBadObjectError;
 }
 
-static OSStatus UA4FX_GetPropertyDataSize(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress *inAddress, UInt32 inQualifierDataSize, const void *inQualifierData, UInt32 *outDataSize) {
+static OSStatus VS100_GetPropertyDataSize(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress *inAddress, UInt32 inQualifierDataSize, const void *inQualifierData, UInt32 *outDataSize) {
     (void)inClientProcessID;
     if (inDriver != gDriverRef || !inAddress || !outDataSize) return kAudioHardwareIllegalOperationError;
     return get_property(inObjectID, inAddress, inQualifierDataSize, inQualifierData, 0, outDataSize, NULL);
 }
 
-static OSStatus UA4FX_GetPropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress *inAddress, UInt32 inQualifierDataSize, const void *inQualifierData, UInt32 inDataSize, UInt32 *outDataSize, void *outData) {
+static OSStatus VS100_GetPropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress *inAddress, UInt32 inQualifierDataSize, const void *inQualifierData, UInt32 inDataSize, UInt32 *outDataSize, void *outData) {
     (void)inClientProcessID;
     if (inDriver != gDriverRef || !inAddress || !outDataSize || !outData) return kAudioHardwareIllegalOperationError;
     return get_property(inObjectID, inAddress, inQualifierDataSize, inQualifierData, inDataSize, outDataSize, outData);
 }
 
-static OSStatus UA4FX_SetPropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress *inAddress, UInt32 inQualifierDataSize, const void *inQualifierData, UInt32 inDataSize, const void *inData) {
+static OSStatus VS100_SetPropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress *inAddress, UInt32 inQualifierDataSize, const void *inQualifierData, UInt32 inDataSize, const void *inData) {
     (void)inClientProcessID; (void)inQualifierDataSize; (void)inQualifierData;
     if (inDriver != gDriverRef || !inAddress) return kAudioHardwareIllegalOperationError;
-    if (inObjectID == kObjectID_Device && inAddress->mSelector == kUA4FX_Property_Config) {
+    if (inObjectID == kObjectID_Device && inAddress->mSelector == kVS100_Property_Config) {
         if (inDataSize != sizeof(CFPropertyListRef) || !inData) return kAudioHardwareBadPropertySizeError;
         CFPropertyListRef pl = *(const CFPropertyListRef *)inData;
         if (!pl || CFGetTypeID(pl) != CFDictionaryGetTypeID()) return kAudioHardwareIllegalOperationError;
@@ -683,14 +683,14 @@ static OSStatus UA4FX_SetPropertyData(AudioServerPlugInDriverRef inDriver, Audio
 /* ------------------------------------------------------------------------- */
 /* IO                                                                          */
 
-static OSStatus UA4FX_StartIO(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID) {
+static OSStatus VS100_StartIO(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID) {
     (void)inClientID;
     if (inDriver != gDriverRef || inDeviceObjectID != kObjectID_Device) return kAudioHardwareBadObjectError;
     OSStatus err = 0;
     pthread_mutex_lock(&gStateMutex);
     if (!atomic_load(&gDevicePresent)) err = kAudioHardwareNotRunningError;
     else if (gIOCount == 0) {
-        int r = ua4fx_engine_start(gEngine);
+        int r = vs100_engine_start(gEngine);
         if (r) { LOGE("HAL: engine start failed 0x%x", r); err = kAudioHardwareUnspecifiedError; }
         else gIOCount = 1;
     } else if (gIOCount == UINT32_MAX) err = kAudioHardwareIllegalOperationError;
@@ -699,26 +699,26 @@ static OSStatus UA4FX_StartIO(AudioServerPlugInDriverRef inDriver, AudioObjectID
     return err;
 }
 
-static OSStatus UA4FX_StopIO(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID) {
+static OSStatus VS100_StopIO(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID) {
     (void)inClientID;
     if (inDriver != gDriverRef || inDeviceObjectID != kObjectID_Device) return kAudioHardwareBadObjectError;
     pthread_mutex_lock(&gStateMutex);
-    if (gIOCount == 1) { gIOCount = 0; ua4fx_engine_stop(gEngine); }
+    if (gIOCount == 1) { gIOCount = 0; vs100_engine_stop(gEngine); }
     else if (gIOCount > 1) gIOCount--;
     pthread_mutex_unlock(&gStateMutex);
     return 0;
 }
 
-static OSStatus UA4FX_GetZeroTimeStamp(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, Float64 *outSampleTime, UInt64 *outHostTime, UInt64 *outSeed) {
+static OSStatus VS100_GetZeroTimeStamp(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, Float64 *outSampleTime, UInt64 *outHostTime, UInt64 *outSeed) {
     (void)inClientID;
     if (inDriver != gDriverRef || inDeviceObjectID != kObjectID_Device) return kAudioHardwareBadObjectError;
     double st; uint64_t ht, seed;
-    if (!ua4fx_engine_get_zero_timestamp(gEngine, &st, &ht, &seed)) return kAudioHardwareNotRunningError;
+    if (!vs100_engine_get_zero_timestamp(gEngine, &st, &ht, &seed)) return kAudioHardwareNotRunningError;
     *outSampleTime = st; *outHostTime = ht; *outSeed = seed;
     return 0;
 }
 
-static OSStatus UA4FX_WillDoIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, UInt32 inOperationID, Boolean *outWillDo, Boolean *outWillDoInPlace) {
+static OSStatus VS100_WillDoIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, UInt32 inOperationID, Boolean *outWillDo, Boolean *outWillDoInPlace) {
     (void)inClientID;
     if (inDriver != gDriverRef || inDeviceObjectID != kObjectID_Device) return kAudioHardwareBadObjectError;
     Boolean willDo = false;
@@ -731,25 +731,25 @@ static OSStatus UA4FX_WillDoIOOperation(AudioServerPlugInDriverRef inDriver, Aud
     return 0;
 }
 
-static OSStatus UA4FX_BeginIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, UInt32 inOperationID, UInt32 inIOBufferFrameSize, const AudioServerPlugInIOCycleInfo *inIOCycleInfo) {
+static OSStatus VS100_BeginIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, UInt32 inOperationID, UInt32 inIOBufferFrameSize, const AudioServerPlugInIOCycleInfo *inIOCycleInfo) {
     (void)inClientID; (void)inOperationID; (void)inIOBufferFrameSize; (void)inIOCycleInfo;
     if (inDriver != gDriverRef || inDeviceObjectID != kObjectID_Device) return kAudioHardwareBadObjectError;
     return 0;
 }
 
-static OSStatus UA4FX_DoIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, AudioObjectID inStreamObjectID, UInt32 inClientID, UInt32 inOperationID, UInt32 inIOBufferFrameSize, const AudioServerPlugInIOCycleInfo *inIOCycleInfo, void *ioMainBuffer, void *ioSecondaryBuffer) {
+static OSStatus VS100_DoIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, AudioObjectID inStreamObjectID, UInt32 inClientID, UInt32 inOperationID, UInt32 inIOBufferFrameSize, const AudioServerPlugInIOCycleInfo *inIOCycleInfo, void *ioMainBuffer, void *ioSecondaryBuffer) {
     (void)inClientID; (void)ioSecondaryBuffer;
     if (inDriver != gDriverRef || inDeviceObjectID != kObjectID_Device) return kAudioHardwareBadObjectError;
     if (!ioMainBuffer || !inIOCycleInfo) return kAudioHardwareIllegalOperationError;
-    if (inIOBufferFrameSize > UA4FX_RING_FRAMES / 4) return kAudioHardwareIllegalOperationError;
+    if (inIOBufferFrameSize > VS100_RING_FRAMES / 4) return kAudioHardwareIllegalOperationError;
 
     /* scratch buffer for the device's native S32_LE frames (24 valid MSBs). The HAL runs
      * all IO operations of a device on one IO thread, sequentially. */
-    static int32_t native[UA4FX_RING_FRAMES / 4 * UA4FX_CHANNELS_IN];
+    static int32_t native[VS100_RING_FRAMES / 4 * VS100_CHANNELS_IN];
 
     if (inOperationID == kAudioServerPlugInIOOperationReadInput && inStreamObjectID == kObjectID_Stream_Input) {
         int64_t t = (int64_t)inIOCycleInfo->mInputTime.mSampleTime;
-        ua4fx_engine_read_input(gEngine, t, inIOBufferFrameSize, native);
+        vs100_engine_read_input(gEngine, t, inIOBufferFrameSize, native);
         Float32 *out = (Float32 *)ioMainBuffer;
         const UInt32 nSamples = inIOBufferFrameSize * kChannelsIn;
         const float scale = atomic_load(&gInputGain) / 2147483648.0f;
@@ -766,13 +766,13 @@ static OSStatus UA4FX_DoIOOperation(AudioServerPlugInDriverRef inDriver, AudioOb
             native[i] = (int32_t)(f * 8388607.0f) * 256;     /* 24-bit value in the top 3 bytes */
         }
         int64_t t = (int64_t)inIOCycleInfo->mOutputTime.mSampleTime;
-        ua4fx_engine_write_output(gEngine, t, inIOBufferFrameSize, native);
+        vs100_engine_write_output(gEngine, t, inIOBufferFrameSize, native);
         return 0;
     }
     return 0;
 }
 
-static OSStatus UA4FX_EndIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, UInt32 inOperationID, UInt32 inIOBufferFrameSize, const AudioServerPlugInIOCycleInfo *inIOCycleInfo) {
+static OSStatus VS100_EndIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, UInt32 inOperationID, UInt32 inIOBufferFrameSize, const AudioServerPlugInIOCycleInfo *inIOCycleInfo) {
     (void)inClientID; (void)inOperationID; (void)inIOBufferFrameSize; (void)inIOCycleInfo;
     if (inDriver != gDriverRef || inDeviceObjectID != kObjectID_Device) return kAudioHardwareBadObjectError;
     return 0;

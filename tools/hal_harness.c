@@ -1,10 +1,10 @@
 /*
- * hal_harness — loads the built UA4FX.driver bundle the way coreaudiod would
+ * hal_harness — loads the built VS100.driver bundle the way coreaudiod would
  * (factory → AudioServerPlugInDriverInterface), provides a fake host, walks
  * the property tree and runs an IO loop calling DoIOOperation exactly like the
  * HAL's IO thread. Lets us validate the plug-in without installing it.
  *
- *   hal_harness build/UA4FX.driver [seconds]
+ *   hal_harness build/VS100.driver [seconds]
  */
 #include <CoreAudio/AudioServerPlugIn.h>
 #include <CoreFoundation/CoreFoundation.h>
@@ -30,12 +30,12 @@ static double tps(void) { mach_timebase_info_data_t tb; mach_timebase_info(&tb);
 #define CHECK(x) do { OSStatus _e = (x); if (_e) { printf("FAIL %s -> %d ('%c%c%c%c')\n", #x, (int)_e, (_e>>24)&255,(_e>>16)&255,(_e>>8)&255,_e&255); fails++; } } while (0)
 
 int main(int argc, char **argv) {
-    if (argc < 2) { fprintf(stderr, "usage: %s path/to/UA4FX.driver [seconds]\n", argv[0]); return 2; }
+    if (argc < 2) { fprintf(stderr, "usage: %s path/to/VS100.driver [seconds]\n", argv[0]); return 2; }
     int seconds = argc > 2 ? atoi(argv[2]) : 4; int fails = 0;
-    char exe[1024]; snprintf(exe, sizeof exe, "%s/Contents/MacOS/UA4FX", argv[1]);
+    char exe[1024]; snprintf(exe, sizeof exe, "%s/Contents/MacOS/VS100", argv[1]);
     void *h = dlopen(exe, RTLD_NOW | RTLD_LOCAL);
     if (!h) { fprintf(stderr, "dlopen: %s\n", dlerror()); return 1; }
-    void *(*factory)(CFAllocatorRef, CFUUIDRef) = dlsym(h, "UA4FX_Create");
+    void *(*factory)(CFAllocatorRef, CFUUIDRef) = dlsym(h, "VS100_Create");
     if (!factory) { fprintf(stderr, "no factory symbol\n"); return 1; }
     AudioServerPlugInDriverRef drv = factory(NULL, kAudioServerPlugInTypeUUID);
     if (!drv) { fprintf(stderr, "factory returned NULL\n"); return 1; }
@@ -49,7 +49,7 @@ int main(int argc, char **argv) {
     CHECK((*drv)->GetPropertyDataSize(drv, kAudioObjectPlugInObject, 0, &addr, 0, NULL, &size));
     CHECK((*drv)->GetPropertyData(drv, kAudioObjectPlugInObject, 0, &addr, 0, NULL, sizeof devs, &size, devs));
     printf("device list: %u device(s)\n", size / (UInt32)sizeof(AudioObjectID));
-    if (size == 0) { printf("no device present — is the UA-4FX connected in Advanced mode?\n"); return 1; }
+    if (size == 0) { printf("no device present — is the VS-100 connected in Advanced mode?\n"); return 1; }
     AudioObjectID dev = devs[0];
 
     CFStringRef s = NULL;

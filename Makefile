@@ -1,8 +1,8 @@
-# UA-4FX user-space driver for macOS (Apple silicon / Intel)
+# VS-100 user-space driver for macOS (Apple silicon / Intel)
 #
 #   make            build everything into ./build
-#   make driver     CoreAudio HAL plug-in  -> build/UA4FX.driver
-#   make midi       CoreMIDI bridge daemon -> build/ua4fx_midid
+#   make driver     CoreAudio HAL plug-in  -> build/VS100.driver
+#   make midi       CoreMIDI bridge daemon -> build/vs100_midid
 #   make tools      engine test + HAL harness
 #   make install    (asks for sudo) install the HAL plug-in + MIDI launch agent
 #   make uninstall
@@ -15,28 +15,28 @@ CFLAGS   += -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-deprecated-decla
             -mmacosx-version-min=$(MINOS) $(addprefix -arch ,$(ARCHS))
 FW_BASE   = -framework CoreFoundation -framework IOKit
 BUILD     = build
-BUNDLE    = $(BUILD)/UA4FX.driver
-ENGINE    = driver/UA4FX_USB.c
-HDRS      = driver/UA4FX_USB.h driver/UA4FX_Log.h
+BUNDLE    = $(BUILD)/VS100.driver
+ENGINE    = driver/VS100_USB.c
+HDRS      = driver/VS100_USB.h driver/VS100_Log.h
 
 all: driver midi tools ui
 
-driver: $(BUNDLE)/Contents/MacOS/UA4FX
+driver: $(BUNDLE)/Contents/MacOS/VS100
 
-$(BUNDLE)/Contents/MacOS/UA4FX: driver/UA4FX_Driver.c $(ENGINE) $(HDRS) driver/Info.plist
+$(BUNDLE)/Contents/MacOS/VS100: driver/VS100_Driver.c $(ENGINE) $(HDRS) driver/Info.plist
 	@mkdir -p $(BUNDLE)/Contents/MacOS $(BUNDLE)/Contents/Resources
 	cp driver/Info.plist $(BUNDLE)/Contents/Info.plist
-	$(CC) $(CFLAGS) -bundle -o $@ driver/UA4FX_Driver.c $(ENGINE) $(FW_BASE) -framework CoreAudio
+	$(CC) $(CFLAGS) -bundle -o $@ driver/VS100_Driver.c $(ENGINE) $(FW_BASE) -framework CoreAudio
 	codesign --force --sign - $(BUNDLE)
 
 midi: $(BUILD)/vs100_midid
 
 $(BUILD)/vs100_midid: midi/vs100_midid.c $(HDRS)
 	@mkdir -p $(BUILD)
-	$(CC) $(CFLAGS) -DUA4FX_LOG_STDERR=1 -o $@ midi/vs100_midid.c $(FW_BASE) -framework CoreMIDI
+	$(CC) $(CFLAGS) -DVS100_LOG_STDERR=1 -o $@ midi/vs100_midid.c $(FW_BASE) -framework CoreMIDI
 	codesign --force --sign - $@
 
-tools: $(BUILD)/ua4fx_test $(BUILD)/hal_harness $(BUILD)/rtl_test $(BUILD)/vs100_midi_listen
+tools: $(BUILD)/vs100_test $(BUILD)/hal_harness $(BUILD)/rtl_test $(BUILD)/vs100_midi_listen
 
 $(BUILD)/vs100_midi_listen: tools/vs100_midi_listen.c
 	@mkdir -p $(BUILD)
@@ -46,22 +46,22 @@ $(BUILD)/rtl_test: tools/rtl_test.c
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) -o $@ tools/rtl_test.c $(FW_BASE) -framework CoreAudio
 
-$(BUILD)/ua4fx_test: tools/ua4fx_test.c $(ENGINE) $(HDRS)
+$(BUILD)/vs100_test: tools/vs100_test.c $(ENGINE) $(HDRS)
 	@mkdir -p $(BUILD)
-	$(CC) $(CFLAGS) -DUA4FX_LOG_STDERR=1 -o $@ tools/ua4fx_test.c $(ENGINE) $(FW_BASE)
+	$(CC) $(CFLAGS) -DVS100_LOG_STDERR=1 -o $@ tools/vs100_test.c $(ENGINE) $(FW_BASE)
 
 $(BUILD)/hal_harness: tools/hal_harness.c
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) -o $@ tools/hal_harness.c $(FW_BASE) -framework CoreAudio
 
-UIAPP = $(BUILD)/UA4FX\ Control.app
-ui: $(BUILD)/UA4FX\ Control.app/Contents/MacOS/UA4FXControl
+UIAPP = $(BUILD)/VS100\ Control.app
+ui: $(BUILD)/VS100\ Control.app/Contents/MacOS/VS100Control
 
-$(BUILD)/UA4FX\ Control.app/Contents/MacOS/UA4FXControl: ui/UA4FXControl.swift ui/Info.plist
-	@mkdir -p "$(BUILD)/UA4FX Control.app/Contents/MacOS" "$(BUILD)/UA4FX Control.app/Contents/Resources"
-	cp ui/Info.plist "$(BUILD)/UA4FX Control.app/Contents/Info.plist"
-	swiftc -O -parse-as-library -target $(firstword $(ARCHS))-apple-macos$(MINOS) -o "$@" ui/UA4FXControl.swift -framework SwiftUI -framework CoreAudio -framework CoreMIDI -framework AppKit
-	codesign --force --sign - "$(BUILD)/UA4FX Control.app"
+$(BUILD)/VS100\ Control.app/Contents/MacOS/VS100Control: ui/VS100Control.swift ui/Info.plist
+	@mkdir -p "$(BUILD)/VS100 Control.app/Contents/MacOS" "$(BUILD)/VS100 Control.app/Contents/Resources"
+	cp ui/Info.plist "$(BUILD)/VS100 Control.app/Contents/Info.plist"
+	swiftc -O -parse-as-library -target $(firstword $(ARCHS))-apple-macos$(MINOS) -o "$@" ui/VS100Control.swift -framework SwiftUI -framework CoreAudio -framework CoreMIDI -framework AppKit
+	codesign --force --sign - "$(BUILD)/VS100 Control.app"
 
 install: driver midi ui
 	./scripts/install.sh

@@ -5,13 +5,13 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleExecutable</key>
-	<string>UA4FX</string>
+	<string>VS100</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.ua4fx.driver</string>
+	<string>com.vs100.driver</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>UA4FX</string>
+	<string>VS100</string>
 	<key>CFBundlePackageType</key>
 	<string>BNDL</string>
 	<key>CFBundleShortVersionString</key>
@@ -19,13 +19,13 @@
 	<key>CFBundleVersion</key>
 	<string>1</string>
 	<key>NSHumanReadableCopyright</key>
-	<string>User-space CoreAudio driver for the EDIROL UA-4FX. Not affiliated with Roland Corporation.</string>
+	<string>User-space CoreAudio driver for the Roland VS-100. Not affiliated with Roland Corporation.</string>
 	<key>CFPlugInDynamicRegistration</key>
 	<string>NO</string>
 	<key>CFPlugInFactories</key>
 	<dict>
 		<key>2B00C831-BA28-48D3-A981-5412DD0E17F7</key>
-		<string>UA4FX_Create</string>
+		<string>VS100_Create</string>
 	</dict>
 	<key>CFPlugInTypes</key>
 	<dict>

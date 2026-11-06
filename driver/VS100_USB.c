@@ -1,5 +1,5 @@
 /*
- * UA4FX_USB.c — user-space isochronous streaming engine for the EDIROL UA-4FX.
+ * VS100_USB.c — user-space isochronous streaming engine for the Roland VS-100.
  *
  * Design (v0.5, "tick" data path)
  * --------------------------------
@@ -26,8 +26,8 @@
  * SET_INTERFACE(alt 1) on the PCM interfaces, then isochronous traffic
  * (same as Linux snd-usb-audio create_uaxx_quirk()).
  */
-#include "UA4FX_USB.h"
-#include "UA4FX_Log.h"
+#include "VS100_USB.h"
+#include "VS100_Log.h"
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
@@ -45,12 +45,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define RING UA4FX_RING_FRAMES
-#define BPFI UA4FX_BPF_IN
-#define BPFO UA4FX_BPF_OUT
-#define UPF  UA4FX_UFRAMES_PER_MS        /* frame-list entries (microframes) per 1 ms bus frame */
-#define MAXNF UA4FX_MAX_FRAMES_PER_XFER
-#define MAXNB UA4FX_MAX_XFERS_IN_FLIGHT
+#define RING VS100_RING_FRAMES
+#define BPFI VS100_BPF_IN
+#define BPFO VS100_BPF_OUT
+#define UPF  VS100_UFRAMES_PER_MS        /* frame-list entries (microframes) per 1 ms bus frame */
+#define MAXNF VS100_MAX_FRAMES_PER_XFER
+#define MAXNB VS100_MAX_XFERS_IN_FLIGHT
 #define START_LEAD_FRAMES 4          /* first submission this many bus frames ahead */
 #define RESYNC_LEAD_FRAMES 4
 #define TICK_OFFSET_US 200.0         /* wake this long after a frame boundary */
@@ -58,7 +58,7 @@
  * frTimeStamp / frActCount, which we zero and the host controller fills in at primary interrupt time. */
 #define POSMAP 64                    /* playback position map depth (bus frames) */
 
-typedef struct ua4fx_engine engine_t;
+typedef struct vs100_engine engine_t;
 
 typedef struct xfer {
     IOUSBLowLatencyIsocFrame *fl;
@@ -91,7 +91,7 @@ typedef struct stream {
     os_unfair_lock lock;
 } stream_t;
 
-struct ua4fx_engine {
+struct vs100_engine {
     /* threads */
     pthread_t   thread;          /* USB / run loop thread */
     CFRunLoopRef rl;
@@ -104,7 +104,7 @@ struct ua4fx_engine {
     /* hot-plug */
     IONotificationPortRef notifyPort;
     io_iterator_t addIter, removeIter;
-    ua4fx_hotplug_cb hotplugCb;
+    vs100_hotplug_cb hotplugCb;
     void *hotplugCtx;
 
     /* device */
@@ -509,7 +509,7 @@ static void poll_tx_locked(engine_t *e) {
  * current-frame estimate follows the tick cadence unless the reference disagrees persistently. */
 static void *tick_thread(void *arg) {
     engine_t *e = (engine_t *)arg;
-    pthread_setname_np("ua4fx-tick");
+    pthread_setname_np("vs100-tick");
     e->tickRtOK = set_realtime(1.0, 0.1, 0.3);
     const double tpm = e->ticksPerMs;
     const double offset = TICK_OFFSET_US / 1000.0 * tpm;
@@ -683,11 +683,11 @@ static void job_stop(engine_t *e, void *arg) {
     LOG("harvest: byPoll=%llu byCallback=%llu lagMax=%.0fus", (unsigned long long)e->harvestedByPoll, (unsigned long long)e->harvestedByCallback, e->harvestLagMaxUs);
 }
 
-int  ua4fx_engine_start(engine_t *e) { int res = 0; engine_sync(e, job_start, &res); return res; }
-void ua4fx_engine_stop(engine_t *e) { engine_sync(e, job_stop, NULL); }
-bool ua4fx_engine_is_running(engine_t *e) { return atomic_load(&e->running); }
-bool ua4fx_engine_input_active(engine_t *e)  { return atomic_load(&e->running) && e->in.streaming; }
-bool ua4fx_engine_output_active(engine_t *e) { return atomic_load(&e->running) && e->out.streaming; }
+int  vs100_engine_start(engine_t *e) { int res = 0; engine_sync(e, job_start, &res); return res; }
+void vs100_engine_stop(engine_t *e) { engine_sync(e, job_stop, NULL); }
+bool vs100_engine_is_running(engine_t *e) { return atomic_load(&e->running); }
+bool vs100_engine_input_active(engine_t *e)  { return atomic_load(&e->running) && e->in.streaming; }
+bool vs100_engine_output_active(engine_t *e) { return atomic_load(&e->running) && e->out.streaming; }
 
 /* ------------------------------------------------------------------------- */
 /* device attach / detach (USB thread)                                         */
@@ -798,13 +798,13 @@ static void devices_removed(void *refcon, io_iterator_t it) { (void)refcon; io_s
 
 static void *usb_thread(void *arg) {
     engine_t *e = (engine_t *)arg;
-    pthread_setname_np("ua4fx-usb");
+    pthread_setname_np("vs100-usb");
     e->rtPolicyOK = set_realtime(1.0, 0.15, 0.5);
     e->rl = CFRunLoopGetCurrent(); CFRetain(e->rl);
     e->notifyPort = IONotificationPortCreate(kIOMainPortDefault);
     CFRunLoopAddSource(e->rl, IONotificationPortGetRunLoopSource(e->notifyPort), kCFRunLoopDefaultMode);
     CFMutableDictionaryRef m = IOServiceMatching(kIOUSBDeviceClassName);
-    int vid = UA4FX_VID, pid = UA4FX_PID_ADVANCED;
+    int vid = VS100_VID, pid = VS100_PID_ADVANCED;
     CFNumberRef v = CFNumberCreate(NULL, kCFNumberIntType, &vid), p = CFNumberCreate(NULL, kCFNumberIntType, &pid);
     CFDictionarySetValue(m, CFSTR(kUSBVendorID), v); CFDictionarySetValue(m, CFSTR(kUSBProductID), p);
     CFRelease(v); CFRelease(p);
@@ -823,10 +823,10 @@ static void *usb_thread(void *arg) {
     return NULL;
 }
 
-ua4fx_engine_t *ua4fx_engine_create(void) {
+vs100_engine_t *vs100_engine_create(void) {
     engine_t *e = calloc(1, sizeof *e);
     e->inRing = calloc(RING, BPFI); e->outRing = calloc(RING, BPFO);
-    e->nf = UA4FX_DEFAULT_FRAMES_PER_XFER; e->nbuf = UA4FX_DEFAULT_XFERS_IN_FLIGHT; e->nbufOut = UA4FX_DEFAULT_XFERS_IN_FLIGHT_OUT; e->outLead = UA4FX_DEFAULT_OUTPUT_LEAD_MS;
+    e->nf = VS100_DEFAULT_FRAMES_PER_XFER; e->nbuf = VS100_DEFAULT_XFERS_IN_FLIGHT; e->nbufOut = VS100_DEFAULT_XFERS_IN_FLIGHT_OUT; e->outLead = VS100_DEFAULT_OUTPUT_LEAD_MS;
     e->in.lock = OS_UNFAIR_LOCK_INIT; e->out.lock = OS_UNFAIR_LOCK_INIT;
     e->ready = dispatch_semaphore_create(0);
     e->seed = (uint64_t)mach_absolute_time();
@@ -837,7 +837,7 @@ ua4fx_engine_t *ua4fx_engine_create(void) {
     return e;
 }
 
-void ua4fx_engine_destroy(engine_t *e) {
+void vs100_engine_destroy(engine_t *e) {
     if (!e) return;
     atomic_store(&e->quit, true);
     CFRunLoopWakeUp(e->rl);
@@ -847,24 +847,24 @@ void ua4fx_engine_destroy(engine_t *e) {
     free(e->inRing); free(e->outRing); free(e);
 }
 
-void ua4fx_engine_set_hotplug_callback(engine_t *e, ua4fx_hotplug_cb cb, void *ctx) { e->hotplugCb = cb; e->hotplugCtx = ctx; }
+void vs100_engine_set_hotplug_callback(engine_t *e, vs100_hotplug_cb cb, void *ctx) { e->hotplugCb = cb; e->hotplugCtx = ctx; }
 
 /* ------------------------------------------------------------------------- */
 /* queries                                                                     */
 
-bool     ua4fx_engine_device_present(engine_t *e) { return atomic_load(&e->present); }
-uint32_t ua4fx_engine_sample_rate(engine_t *e)    { return atomic_load(&e->rate); }
-uint32_t ua4fx_engine_location_id(engine_t *e)    { return e->locationID; }
-const char *ua4fx_engine_serial(engine_t *e)      { return e->serial; }
-uint32_t ua4fx_engine_zts_period(engine_t *e)     { uint32_t r = atomic_load(&e->rate); return r >= 96000 ? 4096 : 2048; }
+bool     vs100_engine_device_present(engine_t *e) { return atomic_load(&e->present); }
+uint32_t vs100_engine_sample_rate(engine_t *e)    { return atomic_load(&e->rate); }
+uint32_t vs100_engine_location_id(engine_t *e)    { return e->locationID; }
+const char *vs100_engine_serial(engine_t *e)      { return e->serial; }
+uint32_t vs100_engine_zts_period(engine_t *e)     { uint32_t r = atomic_load(&e->rate); return r >= 96000 ? 4096 : 2048; }
 
 static uint32_t ms_to_frames(engine_t *e, double ms) { return (uint32_t)((double)atomic_load(&e->rate) * ms / 1000.0 + 0.5); }
 /* Output: frame F is filled at the tick after frame F - lead starts, i.e. ~lead ms before it plays. */
-uint32_t ua4fx_engine_safety_offset_output(engine_t *e) { return ms_to_frames(e, (double)e->outLead + 1.5); }
+uint32_t vs100_engine_safety_offset_output(engine_t *e) { return ms_to_frames(e, (double)e->outLead + 1.5); }
 /* Input: frame F lands in the ring ≤ ~0.9 ms after it ends (measured), plus margin. */
-uint32_t ua4fx_engine_safety_offset_input(engine_t *e)  { return ms_to_frames(e, (double)e->nf + 1.0); }
+uint32_t vs100_engine_safety_offset_input(engine_t *e)  { return ms_to_frames(e, (double)e->nf + 1.0); }
 
-void ua4fx_engine_set_config(engine_t *e, const ua4fx_config_t *c) {
+void vs100_engine_set_config(engine_t *e, const vs100_config_t *c) {
     uint32_t nf = c->framesPerXfer, nb = c->xfersInFlight, no = c->xfersInFlightOut, lead = c->outputLeadMs;
     if (nf < 1) nf = 1; if (nf > MAXNF) nf = MAXNF;
     if (nb < 2) nb = 2; if (nb > MAXNB) nb = MAXNB;
@@ -872,11 +872,11 @@ void ua4fx_engine_set_config(engine_t *e, const ua4fx_config_t *c) {
     if (lead < 1) lead = 1; if (lead > no * nf - 1) lead = no * nf - 1;
     e->nf = nf; e->nbuf = nb; e->nbufOut = no; e->outLead = lead;
 }
-void ua4fx_engine_get_config(engine_t *e, ua4fx_config_t *c) { c->framesPerXfer = e->nf; c->xfersInFlight = e->nbuf; c->xfersInFlightOut = e->nbufOut; c->outputLeadMs = e->outLead; }
-uint32_t ua4fx_engine_latency_input(engine_t *e)  { (void)e; return 8; }
-uint32_t ua4fx_engine_latency_output(engine_t *e) { (void)e; return 8; }
+void vs100_engine_get_config(engine_t *e, vs100_config_t *c) { c->framesPerXfer = e->nf; c->xfersInFlight = e->nbuf; c->xfersInFlightOut = e->nbufOut; c->outputLeadMs = e->outLead; }
+uint32_t vs100_engine_latency_input(engine_t *e)  { (void)e; return 8; }
+uint32_t vs100_engine_latency_output(engine_t *e) { (void)e; return 8; }
 
-bool ua4fx_engine_get_zero_timestamp(engine_t *e, double *sampleTime, uint64_t *hostTime, uint64_t *seed) {
+bool vs100_engine_get_zero_timestamp(engine_t *e, double *sampleTime, uint64_t *hostTime, uint64_t *seed) {
     if (!atomic_load(&e->running)) return false;
     for (;;) {
         uint32_t s1 = atomic_load_explicit(&e->ztsSeq, memory_order_acquire); if (s1 & 1) continue;
@@ -886,20 +886,20 @@ bool ua4fx_engine_get_zero_timestamp(engine_t *e, double *sampleTime, uint64_t *
     }
 }
 
-void ua4fx_engine_read_input(engine_t *e, int64_t sampleTime, uint32_t frames, void *dst) {
+void vs100_engine_read_input(engine_t *e, int64_t sampleTime, uint32_t frames, void *dst) {
     uint8_t *d = (uint8_t *)dst; uint64_t pos = (uint64_t)sampleTime;
     uint32_t first = (uint32_t)(pos & (RING - 1)); uint32_t n1 = frames; if (first + n1 > RING) n1 = RING - first;
     memcpy(d, e->inRing + first * BPFI, n1 * BPFI);
     if (n1 < frames) memcpy(d + n1 * BPFI, e->inRing, (frames - n1) * BPFI);
 }
-void ua4fx_engine_write_output(engine_t *e, int64_t sampleTime, uint32_t frames, const void *src) {
+void vs100_engine_write_output(engine_t *e, int64_t sampleTime, uint32_t frames, const void *src) {
     const uint8_t *s = (const uint8_t *)src; uint64_t pos = (uint64_t)sampleTime;
     uint32_t first = (uint32_t)(pos & (RING - 1)); uint32_t n1 = frames; if (first + n1 > RING) n1 = RING - first;
     memcpy(e->outRing + first * BPFO, s, n1 * BPFO);
     if (n1 < frames) memcpy(e->outRing, s + n1 * BPFO, (frames - n1) * BPFO);
 }
 
-void ua4fx_engine_get_stats(engine_t *e, ua4fx_stats_t *o) {
+void vs100_engine_get_stats(engine_t *e, vs100_stats_t *o) {
     memset(o, 0, sizeof *o);
     o->running = atomic_load(&e->running); o->inputActive = o->running && e->in.streaming; o->outputActive = o->running && e->out.streaming;
     o->captureMaster = e->captureMaster; o->framesPerXfer = e->nf; o->xfersInFlight = e->nbuf; o->xfersInFlightOut = e->nbufOut; o->outputLeadMs = e->outLead;
