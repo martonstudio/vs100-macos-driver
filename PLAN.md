@@ -22,6 +22,6 @@ Order: audio first (user priority), so run 3 → 4 → 2 → 5. Step 1 is comple
 - No kexts, DriverKit entitlements, SIP changes, or firmware flashing. Firmware route is
   closed: no public toolchain, brick risk, and it would not solve implicit feedback or MIDI.
 - Base code: mlodyrafael/ua4fx-macos-driver @ e8b9033 (MIT). Keep its LICENSE and credit.
-- Work from USB observation and Linux sources, never by disassembling Roland's driver.
+- Roland firmware and drivers may be analysed and disassembled (owner's right to repair, EU/AU). Vendor files stay out of git.
 - Descriptor facts live in `docs/DESCRIPTORS.md`; read it rather than re-probing.
 - `ref/` holds read-only upstream clones and is not committed.

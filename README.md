@@ -25,6 +25,3 @@ Goal: get the Cakewalk/Roland V-Studio 100 (VS-100) working on Apple Silicon mac
 
 ## Plan
 See PLAN.md (steps) and NEXT.md (current step). Descriptors: docs/DESCRIPTORS.md.
-
-Note: Cakewalk's EULA forbids reverse engineering *their software*; work from the USB
-protocol, Linux sources and your own captures, not by disassembling Roland's driver.
