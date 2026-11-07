@@ -187,3 +187,121 @@ and contain readable strings (`VS-100 Audio/MIDI`, `USB updater`, `run_vs100upd.
 `USB Mass Storage`). Over the whole image, 7 % (updater) and 13.5 % (application) of
 decoded "instructions" are invalid, consistent with trailing data sections. [I for the
 last clause]
+
+## 5. Recovery: boot paths, update targets, image checks
+
+Analysed offline on 2026-11-07 from a rebuild of the 1 MB image (same sizes, stream ends and
+trailers as above). Tools: `gobjdump -m bfin`, Python. Nothing was sent to the unit.
+Addresses: flash/loader as CPU 0x2000xxxx; updater and application as their run address
+(file offset + 0x100).
+
+### 5.1 Region checksum (supersedes "Not decoded" in section 2)
+
+Each region's last two bytes hold a **16-bit sum of every byte from the region start up to
+(not including) those two bytes**, stored little-endian. The `D4 01` before it is a constant
+that is included in the sum. Matches all four regions: booter 0xA554, loader 0x9F1A,
+updater 0x44DB, application 0x1066. [V, Python over the rebuilt image, and the loader's
+own loops at 0x200017DE and 0x20001840 compute exactly this]
+
+Region+0xF8 holds the version as minor, major: application `32 01` = V1.50. The loader prints
+it with "V%d.%02d(%04X)". [V for the application.] Updater `02 01` = V1.02, booter and loader
+`00 01` = V1.00. [I, same encoding assumed]
+
+### 5.2 Booter (0x0000–0x0FFF): no decisions
+
+Listed in full (0x000–0x63B): set up events, stack and SDRAM controller, run a C-runtime
+section-init table (at 0x624: one entry, zero 0x14 bytes at 0xFF804000), then
+`R7 = 0; JUMP 0x20001000`. No checksum, no SD, no button or GPIO reads, no flash writes. [V]
+
+### 5.3 Loader (0x1000–0x3FFF): the only boot-time decision
+
+The `SD BOOT: V%d.%02d(%04X)` string is in the **loader** data (flash 0x2C9C, copied to
+0xFF905938), not the booter. [V]
+
+Entry 0x20001000: runs its section-init table (flash 0x244C: copies the code at 0x2CDC to
+L1 0xFFA08000, which puts the LZSS routine at 0xFFA082D4; this is why no direct call to
+0x20002FB0 exists), then stores **R7 as the boot mode** at 0xFF905B5C. [V] The booter
+always passes R7 = 0, so a cold power-up is always mode 0. [V] A non-zero mode only exists
+when the updater or application jumps back into the loader: both save the mode they were
+started with at 0xFFB00000 and, on exit, `R7 = [0xFFB00000]; JUMP 0x20001000` (run
+address 0x204). [V]
+
+Loader main (0x20001680), dispatch on mode: [V for the control flow]
+
+| Mode | Action |
+|---|---|
+| 0 (cold boot) | Check application sum. Good: decompress application, jump to 0x100. Bad: check updater sum. Good: set mode 0x33, run updater. Bad: **hang** (loop at 0x200018F8). |
+| high nibble 7 (0x70–0x7F) | No checksum. Print "SD BOOT: V(..)" using halfwords at SDRAM 0xFC/0xFE, wait (2000 × 400 000 loop), jump to 0x100 without decompressing. The code must already be in SDRAM. |
+| any other non-zero | Check updater sum. Good: run updater (mode passed on). Bad: **hang** (0x2000183C). |
+
+Image table (copied from flash 0x2474): [0] = 0x20004100 (updater), [1] = 0x20020100
+(application). Running an image = read BE32 size at the pointer, hang if size ≤ 0,
+LZSS-decompress from pointer+4 to 0x100. [V]
+
+The loader reads no buttons: the mode word is referenced only at 0x103E (store), 0x16BA
+(dispatch) and 0x110A (hand-off), and the state variable only in main. [V] **No button
+combination is checked by the booter or loader.** A button-held-at-power-on path, if it
+exists, would be in the application, which then exits to the loader with a mode. Not
+found or traced. [I / open]
+
+### 5.4 Updater: modes and SD paths
+
+Mode dispatch (0x17B6): high nibble 0x3 → updater task 2; 0x5 → task 4; 0x6 → set "SD"
+flag (0x95B531 = 1) then task 4; anything else → idle forever. [V] Mode 0x33 (bad
+application) therefore lands in task 2. Task 2 = USB (SysEx) updater and task 4 = SD
+updater is [I]: the menu code at 0x2EE2 picks the "SD Booter" / "SD updater" captions from
+the 0x95B531 flag [V], but the task-number-to-transport mapping was not traced.
+
+Updater strings: `USB updater`, `USB updater[All]`, `SD updater`, `SD updater[All]`,
+`SD Booter`, `Insert SD Card`, `a:\%s`, `vs100upd.dat`, `run_vs100upd.dat`,
+`Now SD Reading`, `Now Flash Writing`, `Update Successfully`, `Please Reboot`,
+`Invalid Program`, `booter/loader/updater/app sum error`, `sum area ga chigau`
+(Japanese: "sum area differs"). [V] Which code uses the "[All]" and sum-error strings: not
+traced (they are addressed as base + offset).
+
+**SD-boot hand-off** (0x26854): works on a RAM buffer (0xA85EC4) laid out **exactly like the
+1 MB flash image**: version at +0x200F8, trailer at +0xFFFFC, BE32 size at +0x20100. If
+size > 0: disable interrupts, call 0x26758 on (+0x20104 → 0x100), write mode 0x70 to
+0xFFB00000, shut down peripherals, return to the loader, which then takes the "SD BOOT"
+row above. [V for the offsets and the 0x70 write; 0x26758 being the LZSS decompressor is I]
+
+**Application → updater** (0x167E4 and 0x16B54): `fopen("a:\run_vs100upd.dat", "r")`;
+if it opens, set mode 0x60 and exit to the loader. [V: strings resolved through the
+application's init table at 0x893DC] What UI action reaches this code: not traced. [open]
+
+Inferred SD chain [I]: application finds `run_vs100upd.dat` on the card → mode 0x60 →
+loader checks and runs the flash updater → updater (SD flag set) reads the file, which is a
+full-flash-layout image, decompresses its application slot to RAM, sets mode 0x70 → loader
+runs it from RAM unchecked. `vs100upd.dat` (no `run_`) is probably the image the SD updater
+writes to flash.
+
+### 5.5 What an update can rewrite
+
+The updater's post-write compare (0x2A58–0x2BEE) has four variants: flash 0x0000–0x3FFF
+(booter + loader as one unit, 0x4000 bytes), 0x4000–0x1FFFF (updater), 0x20000–0xFFFFF
+(application, 0xE0000 bytes), and the whole 1 MB. [V] Erase calls with 0x70000/0x80000
+sizes and target 0x20020000 sit at 0x2600–0x265C. [V for the constants, I for meaning]
+
+The v1.50 SysEx set sends data for block 0x00000, which holds booter, loader and the start
+of the updater (section 1). [V] **So the booter is not permanent: the updater has a code
+path that writes it, and Roland's own v1.50 USB update carries it.** [V for both facts;
+whether the updater actually writes 0x0000–0x3FFF in the normal mode or only in "[All]"
+mode, or skips unchanged blocks, is I/open]
+
+### 5.6 Recovery picture
+
+- **Application corrupt, updater intact:** cold boot → app sum fails → updater runs with
+  mode 0x33 → updater task 2. [V up to "task 2"] If task 2 is the USB updater [I], the unit
+  waits for Roland's v1.50 SysEx set (`UsbUp/_00001.mid` … `_00008.mid`) on the VS-100 MIDI
+  port, the documented update procedure. This is the designed safety net.
+- **Updater corrupt too:** loader hangs at 0x200018F8 after printing the version. [V] No
+  in-unit recovery: needs the flash rewritten from outside (JTAG on the Blackfin, or a
+  programmer on the flash chip). [I]
+- **Booter or loader corrupt:** nothing checks them; the CPU runs garbage. [V that nothing
+  checks them] Same external route. [I]
+- **Highest-risk window:** the SysEx order writes block 0x00000 (booter, loader, updater
+  start) first. A power cut or USB drop during that block can leave nothing bootable; a
+  failure during blocks 0x20000+ only damages the application and falls back to the
+  updater. [I, assumes writes follow file order]
+- Before any update: make sure power and USB are stable, and prefer a path that does not
+  rewrite 0x0000–0x3FFF if one exists (open question above).
