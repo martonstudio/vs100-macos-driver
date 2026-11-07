@@ -305,3 +305,25 @@ mode, or skips unchanged blocks, is I/open]
   updater. [I, assumes writes follow file order]
 - Before any update: make sure power and USB are stable, and prefer a path that does not
   rewrite 0x0000–0x3FFF if one exists (open question above).
+
+## 6. Reading the firmware back out; USB identity
+
+Analysed offline on 2026-11-07. The only contact with the unit was macOS reading its
+standard USB descriptors (`ioreg`); no messages were sent.
+
+- Unit as seen by macOS: "VS-100 Audio/MIDI", vendor 0x0582, product 0x00EB, bcdDevice
+  0x0100, serial S35847D. [V] bcdDevice does not encode the firmware version. [I]
+- **No flash read-back over USB.** The updater's only Roland SysEx template is
+  `41 01 00 69 12` (data set, 0x12); there is no request (0x11) form. The application
+  contains no `00 69` model ID at all. Its SysEx templates are the Mackie Control
+  handshake (`F0 00 00 66 …`, "V1.00" is the control-protocol version) and messages to
+  other Roland models (`00 00 3E`, `00 51`). [V by searching both images for templates]
+- **No stock SD backup.** The updater's only file-mode string is "r", and its only file
+  names are `run_vs100upd.dat` and `vs100upd.dat`. The application's only firmware-related
+  name is `a:\run_vs100upd.dat`, opened "r". [V] The application's write-mode use is for
+  recordings and projects. [I]
+- **USB identity is built by the application.** Near application address 0x97338: language
+  ID 0x0409, "Roland", serial placeholder "Z000000", Roland class-specific descriptor
+  `06 24 F1 02 01 01`, "VS-100 Audio/MIDI", followed by endpoint-like tables (64- and
+  512-byte sizes). [V for the bytes] No literal 18-byte device descriptor or `82 05 EB 00`
+  appears, so descriptors are probably assembled at startup. [I]
