@@ -327,3 +327,144 @@ standard USB descriptors (`ioreg`); no messages were sent.
   `06 24 F1 02 01 01`, "VS-100 Audio/MIDI", followed by endpoint-like tables (64- and
   512-byte sizes). [V for the bytes] No literal 18-byte device descriptor or `82 05 EB 00`
   appears, so descriptors are probably assembled at startup. [I]
+
+## 7. G1: what the updater writes, USB vs SD, RAM boot from card
+
+Analysed offline on 2026-11-07 from a fresh rebuild of the 1 MB image (all four region sums
+match, stream ends as in section 4). Tools: `objdump -m bfin`, Python emulation of the
+updater's and application's startup tables (updater pointer at run address 0x1D128, application
+at 0x893D8; 8-byte header, then 16-byte records {dest, size, flags, pattern-len}, type =
+(flags>>6)&7: 0 copy, 1 zero, 3 pattern). Nothing was sent to the unit.
+
+### 7.1 Verdict: **G1 PASS, on the RAM-boot criterion only**
+
+- **RAM boot via SD without a flash write: holds.** [V for every step inside the updater and
+  loader; preconditions in 7.6 still open]
+- **"Application-only update is provably recoverable": does not hold in general.** An
+  app-only update cannot touch 0x0000–0x1FFFF [V], and a corrupt or half-written application
+  falls back to the USB updater [V]. But an application that passes its checksum and then
+  crashes before it reads the panel buttons leaves no way back into the updater, because the
+  booter and loader read no buttons (5.3). [V for the absence of a button check; that a
+  crash-before-scan bricks the unit is I, but follows directly] So flashing must not be the
+  test loop; only an application already proven by RAM boot should ever be flashed.
+
+### 7.2 Updater tasks (open point 2: resolved)
+
+The kernel is TOPPERS/JSP ("JSP Kernel Release … for ADSP-BF533"). Task records sit in L1 at
+0xFF904114 + (id−1)×0x20, layout {attr, exinf, entry, priority, stack size, stack}; the
+code tests attr at +0 for auto-start (0x76C4) and reads priority at +0xC (0x75E0). [V]
+
+| Task | Entry | Role |
+|---|---|---|
+| 1 | 0x16F4 | main (auto-start): reads the mode at 0xFFB00000, dispatches (0x17B6) |
+| 2 | 0x34C4 | **USB updater** (shows "USB updater"/"USB updater[All]", parses USB-MIDI SysEx) |
+| 3 | 0x1EF8 | not traced |
+| 4 | 0x2ED0 | **SD updater / SD Booter** (shows "SD Booter"/"SD updater[All]"/"SD updater", fopen/fread) |
+| 5 | 0x6930 | auto-start, not traced |
+
+All [V]. Dispatch: mode high nibble 3 → `act_tsk(2)`; 5 → `act_tsk(4)`; 6 → set SD flag
+(0x95B531, only writer is 0x2C30, only caller 0x17EC) then `act_tsk(4)`. [V]
+
+### 7.3 What the application can ask for
+
+The application's mode setter is 0x6ED7C (`[0xFFB00000] = R0`). Its only callers: 0x16800
+and 0x16B70 (mode 0x60, after `a:\run_vs100upd.dat` opens) and 0x2B530, which takes the mode
+from a table at 0x292CC4 of {key index, key index, mode}: an entry fires when both keys are
+held. [V]
+
+| Keys | Mode | Updater result |
+|---|---|---|
+| 3 + 0 | 0x33 | USB updater, application only |
+| 3 + 1 | 0x34 | USB updater[All], whole 1 MB |
+| 4 + 0 | 0x53 | SD updater, application only |
+| 4 + 1 | 0x54 | SD updater[All], whole 1 MB |
+| 6 + 2 | 0x60 | SD Booter (run from RAM) |
+
+Table [V]. Which physical buttons the key indices are: not traced. Roland's readme says the
+documented USB update is "power on holding [COMP/EQ Select] + [COMP/EQ CH1]"; that it maps
+to 3 + 0 (mode 0x33) is [I]. The loader's own fallback for a bad application sum is also 0x33
+(5.3). Low nibbles 0 (via 0x60), 3 and 4 are the only ones any producer sets. [V]
+
+### 7.4 State machine 0x2694 (open point 1: resolved)
+
+Context struct at 0xA85EA4: +0 state, +4 low nibble, +8 high nibble ×16, +0x10 bytes
+received, +0x14 buffer pointer (0x985EA4). The init routine 0x2BF0 zeroes the struct and
+**fills the 1 MB buffer with 0xFF** (it is not a copy of the flash, correcting the earlier
+working note). [V] 0x2BF0 is called only through a function-pointer list (0x801120), not
+directly; that it runs before the dispatch is I.
+
+States, each indexed by the low nibble (tables 0x95BC3C, 0x95BC50, 0x95BC64, 0x95BCC4): [V]
+
+| Nibble | 3: check sums in buffer | 4: erase sectors | 5: write (dest, length) | 6: compare |
+|---|---|---|---|---|
+| 0 | all four regions | none | none | none → "Update Successfully" |
+| 1 | booter + loader | 0 | 0x20000000, 0x2000 | 0x0000–0x3FFF |
+| 2 | updater | 1–4 | 0x20004000, 0xE000 | 0x4000–0x1FFFF |
+| 3 | application | 5–18 | 0x20020000, 0x70000 | 0x20000–0xFFFFF |
+| 4 | all four regions | 0–18 | 0x20000000, 0x80000 | 0x0000–0xFFFFF |
+| 5 | skipped | none, returns 0 → "Erase error" | – | – |
+| ≥6 | "sum area ga chigau", fail | – | – | – |
+
+- Sector map: the flash object (init 0x9FB8) carries the list {1×16 KB, 2×8 KB, 1×32 KB,
+  15×64 KB} at 0x95C5C8, so sector 0 = 0x0000–0x3FFF, 1–4 = 0x4000–0x1FFFF, 5–18 =
+  0x20000–0xFFFFF. Erase is the AMD command sequence (AA/55/80/AA/55/30). [V] Write lengths
+  are in 16-bit words. [I, consistent with the byte ranges of the compare]
+- **No compare-and-skip:** each nibble erases and writes exactly one fixed range,
+  unconditionally, and data for other ranges is ignored. [V]
+- Order is check → erase → write → compare; a sum failure stops before any erase. [V]
+- Any failure resets state to 0 and returns negative; the USB task then shows
+  **"Invalid Program"** (0x3630–0x3640). That string is a USB-task result, not a card
+  check. [V]
+
+### 7.5 USB receive path (task 2)
+
+- 0x3AAC parses USB-MIDI packets; 0x381C assembles one SysEx, matches the 5-byte header
+  `41 01 00 69 12` (0x95BED8), accumulates the 5×7-bit address, unpacks 7-to-8, checks the
+  Roland checksum. Only dev 0x01 (data) messages match; the dev 0x00/0x02 block headers are
+  dropped, so the per-block sums in them are never checked. [V]
+- A good message is copied to 0x985EA4 + address **with no bounds check** (0x36B2). The
+  context struct sits right after the buffer at 0xA85EA4, so an address ≥ 0x100000 would
+  overwrite the state and nibble. [V] Constraint for any sender we build: addresses stay
+  below 0x100000.
+- End of transfer = the `end.mid` message: first 15 bytes `F0 41 10 45 00 12 7F 01 00 00 00
+  00 01 00 7F` (0x95BEC8). Then state = 3 and 0x2694 runs. [V]
+
+### 7.6 SD path (task 4; open point 3: resolved)
+
+Startup: caption by flag/nibble, fill the 1 MB card buffer at 0xA85EC4 with 0xFF, wait for
+a card event. [V] Then, from 0x3064:
+
+- **SD flag set (mode 0x60, "SD Booter"):** open `a:\run_vs100upd.dat`, else
+  `a:\vs100upd.dat`, mode "r"; `fread` into 0xA85EC4; if exactly 0x100000 bytes come back,
+  call 0xFFA0C2DC. [V] 0xFFA0C2DC is the L1 copy of image address 0x26854 (startup record
+  loads L1 0xFFA0C000 from run address 0x26578). [V] It shows "SD BOOT" and the file's
+  version (+0x200F8) and trailer (+0xFFFFC), reads the BE32 size at +0x20100, returns if ≤ 0,
+  else disables interrupts, LZSS-decompresses from +0x20104 to 0x100 (routine 0xFFA0C1E0, same
+  0xFEE/0xFFF ring constants as the loader's), writes mode 0x70, masks event sources 0–23,
+  resets peripherals, and jumps to 0x204 (`R7 = [0xFFB00000]; JUMP 0x20001000`). The loader
+  then runs mode 0x7x from 0x100 with no checksum (5.3). [V] **No call to the state machine,
+  erase (0xA174) or write (0xA0B8) on this path.** [V by control flow from 0x3064 to 0x30D8]
+- **SD flag clear (mode 0x53/0x54, "SD updater"):** open `a:\vs100upd.dat`; read exactly
+  0x100000 bytes; copy to the flash buffer 0x985EA4; state = 3; run 0x2694, so the file must
+  pass the region sums for its nibble (application only for 0x53, all four for 0x54) and is
+  then erased/written/compared as in 7.4. [V]
+
+Checks a card file must pass, in summary: [V]
+
+| Path | Name | Size | Sums | Other |
+|---|---|---|---|---|
+| SD Booter (0x60) | `run_vs100upd.dat`, fallback `vs100upd.dat` | `fread` returns exactly 1 MB | **none** | BE32 at +0x20100 > 0; LZSS stream at +0x20104 |
+| SD updater (0x53/0x54) | `vs100upd.dat` | exactly 1 MB | per nibble, 7.4 | written to flash |
+
+"sum area ga chigau" is printed only by the sum check for nibble ≥ 6, which no producer
+sets. [V]
+
+### 7.7 Still open (preconditions for using the RAM-boot route)
+
+- Which physical buttons are key indices 6 and 2 (mode 0x60), and what reaches the
+  application's `run_vs100upd.dat` check at 0x167E4/0x16B54. Both are reachable only from
+  the stock application in flash, which stays untouched on this route. [open]
+- Whether a RAM-booted application behaves like a flash-booted one (it runs from 0x100 with
+  mode 0x70 in 0xFFB00000). [open, G4]
+- Noted for G2, not analysed: the kernel string names **ADSP-BF533**, which has no on-chip
+  USB, so the USB interface is an external controller (section 3 already suspected this).
